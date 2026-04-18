@@ -1,0 +1,5 @@
+[
+  { "vendedorId": "aline", "valor": 100, "status": "PAGO" },
+  { "vendedorId": "jamilles", "valor": 80, "status": "PAGO" },
+  { "vendedorId": "dan", "valor": 50, "status": "PAGO" }
+]
