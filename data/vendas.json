@@ -1,5 +1,6 @@
 [
-  { "vendedorId": "aline", "valor": 100, "status": "PAGO" },
-  { "vendedorId": "jamilles", "valor": 80, "status": "PAGO" },
-  { "vendedorId": "dan", "valor": 50, "status": "PAGO" }
+  { "vendedorId": "1", "valor": 200, "status": "PAGO" },
+  { "vendedorId": "2", "valor": 150, "status": "PAGO" },
+  { "vendedorId": "3", "valor": 300, "status": "PAGO" },
+  { "vendedorId": "1", "valor": 100, "status": "PAGO" }
 ]
