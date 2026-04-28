@@ -1,6 +1,6 @@
 {
-  "name": "backend-reino-bot",
-  "version": "1.0.0",
+  "name": "backend-reino-bot-vendas",
+  "version": "2.0.0",
   "type": "module",
   "main": "index.js",
   "scripts": {
