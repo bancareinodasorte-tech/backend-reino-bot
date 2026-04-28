@@ -1,10 +1,10 @@
-# Bot de Vendas - Reino da Sorte
+# Bot Vendas Reino da Sorte + PagBank Pix
 
 Fluxo:
-1. Cliente envia a quantidade.
-2. Bot calcula valor e envia link PagBank.
-3. Cliente envia comprovante.
-4. Bot pede Nome e Telefone.
-5. Cliente envia dados.
-6. Bot informa que está processando.
-7. Escritório confere pagamento, gera venda no sistema e envia o PDF.
+1. Cliente manda quantidade.
+2. Bot cria Pix dinâmico no PagBank com valor exato.
+3. Bot envia Pix copia e cola.
+4. Cliente paga em qualquer banco.
+5. Cliente envia comprovante.
+6. Bot pede Nome e Telefone.
+7. Escritório gera os bilhetes no sistema atual e envia PDF.
