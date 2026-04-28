@@ -4,179 +4,281 @@ import fs from 'fs';
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 3000;
 
-const EVOLUTION_URL = 'https://evolution-api-production-db99.up.railway.app';
-const EVOLUTION_INSTANCE = 'reino';
-const EVOLUTION_API_KEY = '303778';
+const EVOLUTION_URL = process.env.EVOLUTION_URL || '';
+const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || '';
+const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
 
-function readJson(path) {
+const PRECO_BILHETE = Number(process.env.PRECO_BILHETE || 2);
+const WHATSAPP_ESCRITORIO = process.env.WHATSAPP_ESCRITORIO || '5588994943632';
+
+const PAGAMENTOS_PATH = './data/pagamentos.json';
+const PEDIDOS_PATH = './data/pedidos.json';
+
+function readJson(path, fallback) {
   try {
+    if (!fs.existsSync(path)) return fallback;
     return JSON.parse(fs.readFileSync(path, 'utf8'));
   } catch (error) {
     console.log(`Erro ao ler ${path}:`, error.message);
-    return [];
+    return fallback;
   }
 }
 
-app.get('/', (req, res) => {
-  res.send('Backend Reino da Sorte online ✅');
-});
+function writeJson(path, data) {
+  fs.writeFileSync(path, JSON.stringify(data, null, 2), 'utf8');
+}
 
-app.get('/teste', (req, res) => {
-  res.json({ ok: true, mensagem: 'rota teste funcionando' });
-});
+function somenteNumeros(texto) {
+  return String(texto || '').replace(/\D/g, '');
+}
 
-app.get('/ranking', (req, res) => {
-  try {
-    const vendedores = readJson('./data/vendedores.json');
-    const vendas = readJson('./data/vendas.json');
+function limparNumeroWhatsApp(numero) {
+  return somenteNumeros(String(numero || '').replace('@s.whatsapp.net', '').replace('@c.us', ''));
+}
 
-    const totais = {};
-
-    vendas.forEach((venda) => {
-      if (String(venda.status || '').toUpperCase() === 'PAGO') {
-        const vendedorId = venda.vendedorId;
-        const valor = Number(venda.valor || 0);
-
-        if (!vendedorId) return;
-
-        totais[vendedorId] = (totais[vendedorId] || 0) + valor;
-      }
-    });
-
-    const ranking = vendedores.map((vendedor) => ({
-      id: vendedor.id,
-      nome: vendedor.nome,
-      total: totais[vendedor.id] || 0
-    }));
-
-    ranking.sort((a, b) => b.total - a.total);
-
-    res.json(ranking);
-  } catch (error) {
-    console.error('Erro na rota /ranking:', error);
-    res.status(500).json({ erro: 'Erro ao gerar ranking' });
-  }
-});
-
-function extrairNumero(body) {
-  return (
-    body?.data?.key?.remoteJid ||
-    body?.data?.messages?.[0]?.key?.remoteJid ||
-    body?.key?.remoteJid ||
+function extrairNumero(payload) {
+  return limparNumeroWhatsApp(
+    payload?.data?.key?.remoteJid ||
+    payload?.data?.remoteJid ||
+    payload?.data?.sender ||
+    payload?.sender ||
+    payload?.from ||
+    payload?.remoteJid ||
     ''
   );
 }
 
-function extrairMensagem(body) {
-  return (
-    body?.data?.message?.conversation ||
-    body?.data?.message?.extendedTextMessage?.text ||
-    body?.data?.message?.imageMessage?.caption ||
-    body?.data?.message?.videoMessage?.caption ||
-    body?.data?.messages?.[0]?.message?.conversation ||
-    body?.data?.messages?.[0]?.message?.extendedTextMessage?.text ||
-    body?.message?.conversation ||
-    body?.message?.extendedTextMessage?.text ||
+function mensagemFoiMinha(payload) {
+  return Boolean(payload?.data?.key?.fromMe || payload?.data?.fromMe);
+}
+
+function extrairTexto(payload) {
+  const msg = payload?.data?.message || payload?.message || {};
+  return String(
+    msg?.conversation ||
+    msg?.extendedTextMessage?.text ||
+    msg?.imageMessage?.caption ||
+    msg?.documentMessage?.caption ||
+    payload?.data?.messageText ||
+    payload?.data?.text ||
+    payload?.body ||
+    payload?.text ||
     ''
-  );
+  ).trim();
 }
 
-function mensagemEnviadaPorMim(body) {
-  return Boolean(
-    body?.data?.key?.fromMe ||
-    body?.data?.messages?.[0]?.key?.fromMe ||
-    body?.key?.fromMe
-  );
+function temMidia(payload) {
+  const msg = payload?.data?.message || payload?.message || {};
+  return Boolean(msg?.imageMessage || msg?.documentMessage || msg?.videoMessage);
 }
 
-function deveIgnorarNumero(numero) {
-  return (
-    !numero ||
-    numero.endsWith('@g.us') ||
-    numero === 'status@broadcast' ||
-    numero.includes('broadcast')
-  );
+function valorBR(valor) {
+  return Number(valor || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
 
-async function enviarMensagem(numero, texto) {
-  const numeroLimpo = String(numero)
-    .replace('@s.whatsapp.net', '')
-    .replace('@lid', '')
-    .replace(/\D/g, '');
+function agoraBR() {
+  return new Date().toLocaleString('pt-BR', { timeZone: 'America/Fortaleza' });
+}
 
-  const url = `${EVOLUTION_URL}/message/sendText/${EVOLUTION_INSTANCE}`;
+function salvarPedido(numero, dados) {
+  const pedidos = readJson(PEDIDOS_PATH, {});
+  pedidos[numero] = { ...(pedidos[numero] || {}), ...dados, atualizadoEm: agoraBR() };
+  writeJson(PEDIDOS_PATH, pedidos);
+  return pedidos[numero];
+}
 
-  const payload = {
-    number: numeroLimpo,
-    text: texto
-  };
+function pedidoAtual(numero) {
+  const pedidos = readJson(PEDIDOS_PATH, {});
+  return pedidos[numero] || null;
+}
 
-  console.log('Enviando para Evolution:', payload);
+function listarQuantidadesDisponiveis() {
+  const pagamentos = readJson(PAGAMENTOS_PATH, {});
+  return Object.keys(pagamentos).map(Number).filter(n => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
+}
 
-  const response = await fetch(url, {
+function linkPagamentoPorQuantidade(qtd) {
+  const pagamentos = readJson(PAGAMENTOS_PATH, {});
+  return pagamentos[String(qtd)] || '';
+}
+
+async function enviarTexto(numero, texto) {
+  if (!EVOLUTION_URL || !EVOLUTION_INSTANCE || !EVOLUTION_API_KEY) {
+    console.log('RESPOSTA SIMULADA PARA', numero, '\n', texto);
+    return;
+  }
+
+  const url = `${EVOLUTION_URL.replace(/\/$/, '')}/message/sendText/${EVOLUTION_INSTANCE}`;
+
+  const resposta = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: EVOLUTION_API_KEY
-    },
-    body: JSON.stringify(payload)
+    headers: { 'Content-Type': 'application/json', 'apikey': EVOLUTION_API_KEY },
+    body: JSON.stringify({ number: numero, text: texto })
   });
 
-  const data = await response.text();
-  console.log('Status Evolution:', response.status);
-  console.log('Resposta Evolution:', data);
+  if (!resposta.ok) {
+    const erro = await resposta.text();
+    console.log('Erro ao enviar mensagem:', resposta.status, erro);
+  }
 }
+
+function mensagemInicial() {
+  return `🟢 CENTRAL AUTOMÁTICA DE VENDAS
+REINO DA SORTE
+
+⚡ Este canal é exclusivo para compras.
+
+Digite apenas a quantidade de bilhetes desejada.
+
+Exemplo:
+5
+
+Cada bilhete custa R$ ${PRECO_BILHETE.toFixed(2).replace('.', ',')}`;
+}
+
+function mensagemPagamento(qtd, link) {
+  const valor = qtd * PRECO_BILHETE;
+  return `🧾 PEDIDO GERADO
+
+Quantidade: ${qtd} bilhete${qtd > 1 ? 's' : ''}
+Valor total: ${valorBR(valor)}
+
+💳 PAGAMENTO VIA PIX:
+${link}
+
+Após pagar, envie o comprovante aqui.
+
+🔒 Compra segura e oficial
+⚡ Liberação rápida após confirmação
+📄 Comprovante dos bilhetes em PDF`;
+}
+
+function mensagemSemLink(qtd) {
+  const disponiveis = listarQuantidadesDisponiveis();
+  const lista = disponiveis.length ? disponiveis.join(', ') : 'nenhuma quantidade cadastrada ainda';
+  return `⚠️ Ainda não existe link de pagamento cadastrado para ${qtd} bilhete${qtd > 1 ? 's' : ''}.
+
+Quantidades disponíveis no automático:
+${lista}
+
+Digite uma das quantidades acima.`;
+}
+
+function mensagemPedirDados() {
+  return `🔎 PAGAMENTO RECEBIDO
+
+Agora envie os dados para gerar seus bilhetes:
+
+Nome:
+Telefone:
+
+Exemplo:
+Nome: Maria Silva
+Telefone: 88999999999`;
+}
+
+function mensagemProcessando() {
+  return `✅ DADOS RECEBIDOS
+
+Sua compra está sendo processada.
+
+Aguarde a geração dos bilhetes em PDF.`;
+}
+
+function mensagemForaDoFluxo() {
+  return `Digite somente a quantidade de bilhetes desejada.
+
+Exemplo:
+5`;
+}
+
+async function processarMensagem(numero, texto, recebeuMidia) {
+  if (!pedidoAtual(numero)) salvarPedido(numero, { etapa: 'aguardando_quantidade' });
+
+  const textoLimpo = String(texto || '').trim();
+
+  if (/^menu$/i.test(textoLimpo) || /^comprar$/i.test(textoLimpo) || /^iniciar$/i.test(textoLimpo)) {
+    await enviarTexto(numero, mensagemInicial());
+    return;
+  }
+
+  if (recebeuMidia || /comprovante|paguei|pago|pix feito|transferido/i.test(textoLimpo)) {
+    salvarPedido(numero, { etapa: 'aguardando_dados', comprovanteRecebido: true });
+    await enviarTexto(numero, mensagemPedirDados());
+    return;
+  }
+
+  const etapa = pedidoAtual(numero)?.etapa || 'aguardando_quantidade';
+
+  if (etapa === 'aguardando_dados') {
+    salvarPedido(numero, { etapa: 'aguardando_geracao_pdf', dadosCliente: textoLimpo });
+    await enviarTexto(numero, mensagemProcessando());
+    return;
+  }
+
+  const qtd = Number(somenteNumeros(textoLimpo));
+
+  if (!qtd || qtd <= 0 || qtd > 999) {
+    await enviarTexto(numero, mensagemForaDoFluxo());
+    return;
+  }
+
+  const link = linkPagamentoPorQuantidade(qtd);
+
+  if (!link || link.includes('COLE_AQUI')) {
+    await enviarTexto(numero, mensagemSemLink(qtd));
+    return;
+  }
+
+  salvarPedido(numero, { etapa: 'aguardando_pagamento', quantidade: qtd, valor: qtd * PRECO_BILHETE, linkPagamento: link });
+  await enviarTexto(numero, mensagemPagamento(qtd, link));
+}
+
+app.get('/', (req, res) => res.send('Bot de Vendas Reino da Sorte online ✅'));
+
+app.get('/teste', (req, res) => res.json({ ok: true, mensagem: 'Bot funcionando ✅', horario: agoraBR() }));
+
+app.get('/pagamentos', (req, res) => res.json(readJson(PAGAMENTOS_PATH, {})));
+
+app.get('/pedidos', (req, res) => res.json(readJson(PEDIDOS_PATH, {})));
 
 app.post('/webhook', async (req, res) => {
   try {
-    const body = req.body;
+    const payload = req.body;
+    const evento = String(payload?.event || payload?.type || '').toLowerCase();
 
-    console.log('===== WEBHOOK RECEBIDO =====');
-    console.log(JSON.stringify(body, null, 2));
-
-    const numero = extrairNumero(body);
-    const textoOriginal = extrairMensagem(body);
-    const texto = String(textoOriginal).trim();
-
-    console.log('Número extraído:', numero);
-    console.log('Texto extraído:', texto);
-
-    if (mensagemEnviadaPorMim(body)) {
-      console.log('Ignorado: mensagem enviada por mim');
-      return res.sendStatus(200);
+    if (evento && !evento.includes('message') && !evento.includes('messages')) {
+      return res.json({ ok: true, ignorado: 'evento não é mensagem' });
     }
 
-    if (deveIgnorarNumero(numero)) {
-      console.log('Ignorado: grupo/status/broadcast');
-      return res.sendStatus(200);
+    if (mensagemFoiMinha(payload)) {
+      return res.json({ ok: true, ignorado: 'mensagem enviada por mim' });
     }
 
-    if (!texto) {
-      console.log('Ignorado: sem texto');
-      return res.sendStatus(200);
-    }
+    const numero = extrairNumero(payload);
+    const texto = extrairTexto(payload);
+    const recebeuMidia = temMidia(payload);
 
-    await enviarMensagem(
-      numero,
-      `✅ TESTE DO BOT OK
+    if (!numero) return res.json({ ok: true, ignorado: 'sem número' });
 
-Recebi sua mensagem:
-"${texto}"
-
-Se você recebeu isso, webhook + Evolution + backend estão funcionando.`
-    );
-
-    return res.sendStatus(200);
+    await processarMensagem(numero, texto, recebeuMidia);
+    res.json({ ok: true });
   } catch (error) {
-    console.error('ERRO NO WEBHOOK:', error);
-    return res.sendStatus(200);
+    console.log('Erro no webhook:', error);
+    res.status(500).json({ ok: false, erro: error.message });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT}`);
+app.post('/simular', async (req, res) => {
+  const numero = limparNumeroWhatsApp(req.body.numero || WHATSAPP_ESCRITORIO);
+  const texto = String(req.body.texto || '');
+  const midia = Boolean(req.body.midia);
+  await processarMensagem(numero, texto, midia);
+  res.json({ ok: true, numero, texto, midia });
 });
+
+app.listen(PORT, () => console.log(`Bot de Vendas Reino da Sorte rodando na porta ${PORT}`));
