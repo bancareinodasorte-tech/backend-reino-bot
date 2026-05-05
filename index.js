@@ -31,7 +31,7 @@ function detectarInteresse(mensagem = "") {
 }
 
 async function supabaseInsert(tabela, dados) {
-  const resposta = await fetch(`${SUPABASE_URL}/rest/v1/${tabela}`, {
+  const resposta = await fetch(`${SUPABASE_URL}/rest/v1/public.${tabela}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
