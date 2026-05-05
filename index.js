@@ -5,19 +5,22 @@ import fetch from "node-fetch";
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: "15mb" }));
+app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-const BACKEND_URL = process.env.BACKEND_URL || "https://backend-reino-bot.onrender.com";
-const EVOLUTION_URL = process.env.EVOLUTION_URL || "https://evolution-api-production-db99.up.railway.app";
-const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || "reino4";
-const EVOLUTION_KEY = process.env.EVOLUTION_KEY || "2FFDDECB0586-4E9A-8C8C-EFC332EC4F24";
+const EVOLUTION_URL = "https://evolution-api-production-db99.up.railway.app";
+const EVOLUTION_INSTANCE = "reino4";
+const EVOLUTION_API_KEY = "2FFDDECB0586-4E9A-8C8C-EFC332EC4F24";
 
+// ========================
+// DETECTAR INTERESSE
+// ========================
 function detectarInteresse(mensagem = "") {
-  const texto = String(mensagem).toLowerCase();
+  const texto = mensagem.toLowerCase();
 
   const palavras = [
     "quero",
@@ -29,442 +32,159 @@ function detectarInteresse(mensagem = "") {
     "bilhete",
     "bilhetes",
     "tenho interesse",
-    "vou querer",
-    "sim",
-    "quanto",
-    "chave"
+    "vou querer"
   ];
 
   return palavras.some((p) => texto.includes(p));
 }
 
-function limparTelefone(telefone = "") {
-  return String(telefone)
-    .replace("@s.whatsapp.net", "")
-    .replace("@c.us", "")
-    .replace(/\D/g, "");
-}
-
-function extrairTelefone(body = {}) {
-  return (
-    body.telefone ||
-    body.number ||
-    body.remoteJid ||
-    body?.data?.key?.remoteJid ||
-    body?.key?.remoteJid ||
-    body?.data?.remoteJid ||
-    body?.sender ||
-    "sem-telefone"
-  );
-}
-
-function extrairMensagem(body = {}) {
-  const data = body?.data || {};
-  const message = body?.message || data?.message || {};
-
-  return (
-    body.mensagem ||
-    body.text ||
-    body.messageText ||
-    data?.text ||
-    message?.conversation ||
-    message?.extendedTextMessage?.text ||
-    message?.imageMessage?.caption ||
-    message?.videoMessage?.caption ||
-    message?.documentMessage?.caption ||
-    ""
-  );
-}
-
-function mensagemEhMinha(body = {}) {
-  return Boolean(
-    body?.data?.key?.fromMe ||
-    body?.key?.fromMe ||
-    body?.fromMe
-  );
-}
-
-async function supabaseGet(tabela) {
-  const resposta = await fetch(`${SUPABASE_URL}/rest/v1/${tabela}?select=*&order=id.desc`, {
-    method: "GET",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`
-    }
-  });
-
-  if (!resposta.ok) {
-    const erro = await resposta.text();
-    throw new Error(`Erro Supabase GET ${tabela}: ${erro}`);
-  }
-
-  return resposta.json();
-}
-
-async function supabasePost(tabela, dados, options = {}) {
-  const { upsert = false, conflito = "" } = options;
-
-  let url = `${SUPABASE_URL}/rest/v1/${tabela}`;
-
-  if (upsert && conflito) {
-    url += `?on_conflict=${conflito}`;
-  }
-
-  const resposta = await fetch(url, {
+// ========================
+// SUPABASE UPSERT
+// ========================
+async function supabaseUpsert(tabela, dados) {
+  const resposta = await fetch(`${SUPABASE_URL}/rest/v1/${tabela}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       apikey: SUPABASE_KEY,
       Authorization: `Bearer ${SUPABASE_KEY}`,
-      Prefer: upsert
-        ? "resolution=merge-duplicates,return=minimal"
-        : "return=minimal"
+      Prefer: "resolution=merge-duplicates"
     },
     body: JSON.stringify(dados)
   });
 
   if (!resposta.ok) {
     const erro = await resposta.text();
-    throw new Error(`Erro Supabase POST ${tabela}: ${erro}`);
+    throw new Error(`Erro Supabase ${tabela}: ${erro}`);
   }
 }
 
-async function salvarMensagem({ telefone, mensagem, origem }) {
-  const telefoneLimpo = limparTelefone(telefone);
-  const textoMensagem = String(mensagem || "").trim();
-  const interessado = detectarInteresse(textoMensagem);
-
-  await supabasePost(
-    "contatos",
-    {
-      telefone: telefoneLimpo,
-      ultima_mensagem: textoMensagem,
-      interessado
-    },
-    {
-      upsert: true,
-      conflito: "telefone"
-    }
-  );
-
-  await supabasePost("respostas", {
-    telefone: telefoneLimpo,
-    mensagem: textoMensagem,
-    interessado
-  });
-
-  if (interessado) {
-    await supabasePost("interessados", {
-      telefone: telefoneLimpo,
-      origem
-    });
-  }
-
-  return {
-    telefone: telefoneLimpo,
-    mensagem: textoMensagem,
-    interessado
-  };
-}
-
-async function enviarTextoWhatsApp(numero, texto) {
-  const telefone = limparTelefone(numero);
-
-  const resposta = await fetch(`${EVOLUTION_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: EVOLUTION_KEY
-    },
-    body: JSON.stringify({
-      number: telefone,
-      textMessage: {
-        text: texto
-      }
-    })
-  });
-
-  const respostaTexto = await resposta.text();
-
-  if (!resposta.ok) {
-    throw new Error(`Erro ao enviar WhatsApp: ${respostaTexto}`);
-  }
-
-  try {
-    return JSON.parse(respostaTexto);
-  } catch {
-    return { raw: respostaTexto };
-  }
-}
-
-async function configurarWebhookEvolution() {
-  const payload = {
-    enabled: true,
-    url: `${BACKEND_URL}/webhook`,
-    webhook_by_events: false,
-    webhookByEvents: false,
-    base64: false,
-    headers: {},
-    events: ["MESSAGES_UPSERT"]
-  };
-
-  const resposta = await fetch(`${EVOLUTION_URL}/webhook/set/${EVOLUTION_INSTANCE}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: EVOLUTION_KEY
-    },
-    body: JSON.stringify(payload)
-  });
-
-  const texto = await resposta.text();
-
-  let retorno;
-  try {
-    retorno = JSON.parse(texto);
-  } catch {
-    retorno = { raw: texto };
-  }
-
-  return {
-    ok: resposta.ok,
-    status: resposta.status,
-    payload,
-    retorno
-  };
-}
-
-async function processarWebhook(req, res) {
-  try {
-    console.log("WEBHOOK RECEBIDO:", JSON.stringify(req.body));
-
-    if (mensagemEhMinha(req.body)) {
-      return res.json({
-        sucesso: true,
-        ignorado: true,
-        motivo: "Mensagem enviada pelo próprio número"
-      });
-    }
-
-    const telefone = extrairTelefone(req.body);
-    const mensagem = extrairMensagem(req.body);
-
-    if (!mensagem) {
-      return res.json({
-        sucesso: true,
-        ignorado: true,
-        motivo: "Evento sem texto de mensagem"
-      });
-    }
-
-    const resultado = await salvarMensagem({
-      telefone,
-      mensagem,
-      origem: "whatsapp"
-    });
-
-    res.json({
-      sucesso: true,
-      ...resultado
-    });
-  } catch (erro) {
-    console.error("Erro no webhook:", erro.message);
-
-    res.status(500).json({
-      sucesso: false,
-      erro: erro.message
-    });
-  }
-}
-
-app.get("/", (req, res) => {
-  res.send("Backend Reino Zap V3 ONLINE 🚀");
-});
-
+// ========================
+// STATUS
+// ========================
 app.get("/status", (req, res) => {
   res.json({
-    online: true,
-    sistema: "Reino Zap",
-    versao: "3.0.0",
-    backend: BACKEND_URL,
-    evolutionUrl: EVOLUTION_URL,
-    evolutionInstance: EVOLUTION_INSTANCE
+    status: "online",
+    versao: "4.0.0"
   });
 });
 
+// ========================
+// CONFIGURAR WEBHOOK (CORRIGIDO)
+// ========================
 app.get("/configurar-webhook", async (req, res) => {
   try {
-    const resultado = await configurarWebhookEvolution();
+    const resposta = await fetch(
+      `${EVOLUTION_URL}/webhook/set/${EVOLUTION_INSTANCE}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: EVOLUTION_API_KEY
+        },
+        body: JSON.stringify({
+          webhook: {
+            enabled: true,
+            url: "https://backend-reino-bot.onrender.com/webhook",
+            events: ["MESSAGES_UPSERT"]
+          }
+        })
+      }
+    );
+
+    const data = await resposta.json();
 
     res.json({
-      sucesso: resultado.ok,
-      mensagem: resultado.ok
-        ? "Webhook configurado na Evolution API"
-        : "A Evolution API retornou erro ao configurar webhook",
-      status: resultado.status,
-      configuracaoEnviada: resultado.payload,
-      retornoEvolution: resultado.retorno
+      sucesso: resposta.ok,
+      retornoEvolution: data
     });
   } catch (erro) {
-    res.status(500).json({
+    res.json({
       sucesso: false,
       erro: erro.message
     });
   }
 });
 
-app.get("/painel", (req, res) => {
-  res.send(`
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Reino Zap - Painel</title>
-  <style>
-    *{box-sizing:border-box}
-    body{margin:0;font-family:Arial,sans-serif;background:#0b1220;color:#fff}
-    header{background:#0f1f3d;padding:18px;text-align:center;border-bottom:3px solid #1d4ed8}
-    header h1{margin:0;font-size:24px} header p{margin:6px 0 0;color:#cbd5e1;font-size:14px}
-    main{padding:15px;max-width:1000px;margin:auto}.grid{display:grid;grid-template-columns:1fr;gap:15px}
-    .card{background:#111827;border:1px solid #243047;border-radius:16px;padding:16px;box-shadow:0 8px 25px rgba(0,0,0,.25)}
-    h2{font-size:18px;margin:0 0 12px;color:#93c5fd}input,textarea,button{width:100%;border-radius:12px;border:0;padding:13px;font-size:15px;margin-bottom:10px}
-    input,textarea{background:#0b1220;color:#fff;border:1px solid #334155}textarea{min-height:110px;resize:vertical}button{background:#2563eb;color:white;font-weight:bold;cursor:pointer}.btn-green{background:#16a34a}.btn-orange{background:#f97316}.btn-red{background:#dc2626}.lista{display:flex;flex-direction:column;gap:10px;margin-top:10px}.item{background:#0b1220;border:1px solid #334155;border-radius:12px;padding:12px;font-size:14px}.item strong{color:#bfdbfe}.ok{color:#86efac;font-weight:bold}.erro{color:#fca5a5;font-weight:bold}.contador{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:15px}.box{background:#172554;border-radius:14px;padding:14px;text-align:center}.box b{font-size:22px;display:block}.box span{font-size:12px;color:#cbd5e1}
-  </style>
-</head>
-<body>
-  <header><h1>👑 Reino Zap</h1><p>Painel de vendas por WhatsApp</p></header>
-  <main>
-    <div class="contador"><div class="box"><b id="totalContatos">0</b><span>Contatos</span></div><div class="box"><b id="totalInteressados">0</b><span>Interessados</span></div><div class="box"><b id="totalCampanhas">0</b><span>Campanhas</span></div></div>
-    <div class="grid">
-      <div class="card"><h2>Configurar Webhook</h2><button class="btn-red" onclick="configurarWebhook()">Configurar Evolution API</button><div id="msgWebhook"></div></div>
-      <div class="card"><h2>Adicionar contato</h2><input id="nomeContato" placeholder="Nome do cliente (opcional)"><input id="telefoneContato" placeholder="Telefone com DDD. Ex: 558899999999"><button onclick="salvarContato()">Salvar contato</button><div id="msgContato"></div></div>
-      <div class="card"><h2>Criar campanha</h2><textarea id="mensagemCampanha" placeholder="Digite a mensagem da campanha."></textarea><button class="btn-green" onclick="criarCampanha()">Salvar campanha</button><div id="msgCampanha"></div></div>
-      <div class="card"><h2>Enviar teste WhatsApp</h2><input id="telefoneEnvio" placeholder="Telefone" value="558899999999"><textarea id="mensagemEnvio">Teste Reino Zap ✅</textarea><button class="btn-green" onclick="enviarTeste()">Enviar mensagem</button><div id="msgEnvio"></div></div>
-      <div class="card"><h2>Teste de interesse</h2><input id="telefoneTeste" placeholder="Telefone para teste" value="558899999999"><input id="mensagemTeste" placeholder="Mensagem" value="quero comprar"><button class="btn-orange" onclick="testarMensagem()">Testar mensagem</button><div id="msgTeste"></div></div>
-      <div class="card"><h2>Interessados</h2><button onclick="carregarDados()">Atualizar lista</button><div id="listaInteressados" class="lista"></div></div>
-      <div class="card"><h2>Contatos</h2><div id="listaContatos" class="lista"></div></div>
-      <div class="card"><h2>Campanhas</h2><div id="listaCampanhas" class="lista"></div></div>
-    </div>
-  </main>
-<script>
-async function api(url, options){ const r = await fetch(url, options); return await r.json(); }
-function mostrar(id, texto, tipo){ document.getElementById(id).innerHTML='<p class="'+tipo+'">'+texto+'</p>'; }
-async function configurarWebhook(){ const r=await api('/configurar-webhook'); mostrar('msgWebhook', r.sucesso ? 'Webhook configurado ✅' : (r.erro || 'Erro ao configurar'), r.sucesso?'ok':'erro'); }
-async function salvarContato(){ const nome=document.getElementById('nomeContato').value; const telefone=document.getElementById('telefoneContato').value; const r=await api('/contatos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nome,telefone})}); if(r.sucesso){mostrar('msgContato','Contato salvo ✅','ok');document.getElementById('nomeContato').value='';document.getElementById('telefoneContato').value='';carregarDados();}else{mostrar('msgContato',r.erro,'erro');}}
-async function criarCampanha(){ const mensagem=document.getElementById('mensagemCampanha').value; const r=await api('/campanhas',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mensagem})}); if(r.sucesso){mostrar('msgCampanha','Campanha salva ✅','ok');document.getElementById('mensagemCampanha').value='';carregarDados();}else{mostrar('msgCampanha',r.erro,'erro');}}
-async function enviarTeste(){ const number=document.getElementById('telefoneEnvio').value; const text=document.getElementById('mensagemEnvio').value; const r=await api('/enviar-teste-whatsapp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({number,text})}); mostrar('msgEnvio', r.sucesso?'Mensagem enviada ✅':(r.erro||'Erro'), r.sucesso?'ok':'erro'); }
-async function testarMensagem(){ const telefone=document.getElementById('telefoneTeste').value; const mensagem=encodeURIComponent(document.getElementById('mensagemTeste').value); const r=await api('/teste?telefone='+telefone+'&mensagem='+mensagem); if(r.sucesso){mostrar('msgTeste','Mensagem registrada. Interessado: '+r.interessado,'ok');carregarDados();}else{mostrar('msgTeste',r.erro,'erro');}}
-async function carregarDados(){ const contatos=await api('/contatos'); const interessados=await api('/interessados'); const campanhas=await api('/campanhas'); document.getElementById('totalContatos').innerText=contatos.total||0; document.getElementById('totalInteressados').innerText=interessados.total||0; document.getElementById('totalCampanhas').innerText=campanhas.total||0; document.getElementById('listaContatos').innerHTML=(contatos.contatos||[]).map(c=>'<div class="item"><strong>'+(c.nome||'Sem nome')+'</strong><br>Telefone: '+c.telefone+'<br>Status: '+(c.status||'-')+'<br>Última: '+(c.ultima_mensagem||'-')+'</div>').join('')||'<p>Nenhum contato.</p>'; document.getElementById('listaInteressados').innerHTML=(interessados.interessados||[]).map(i=>'<div class="item"><strong>'+i.telefone+'</strong><br>Origem: '+(i.origem||'-')+'</div>').join('')||'<p>Nenhum interessado.</p>'; document.getElementById('listaCampanhas').innerHTML=(campanhas.campanhas||[]).map(c=>'<div class="item"><strong>Status: '+c.status+'</strong><br>'+c.mensagem+'<br>Enviados: '+c.enviados+'</div>').join('')||'<p>Nenhuma campanha.</p>'; }
-carregarDados();
-</script>
-</body>
-</html>`);
-});
-
-app.get("/contatos", async (req, res) => {
-  try {
-    const contatos = await supabaseGet("contatos");
-    res.json({ sucesso: true, total: contatos.length, contatos });
-  } catch (erro) {
-    res.status(500).json({ sucesso: false, erro: erro.message });
-  }
-});
-
-app.post("/contatos", async (req, res) => {
-  try {
-    const telefone = limparTelefone(req.body.telefone);
-    const nome = req.body.nome || "";
-    const status = req.body.status || "novo";
-
-    if (!telefone) {
-      return res.status(400).json({ sucesso: false, erro: "Telefone obrigatório" });
-    }
-
-    await supabasePost(
-      "contatos",
-      { telefone, nome, status },
-      { upsert: true, conflito: "telefone" }
-    );
-
-    res.json({ sucesso: true, mensagem: "Contato salvo", telefone, nome, status });
-  } catch (erro) {
-    res.status(500).json({ sucesso: false, erro: erro.message });
-  }
-});
-
-app.get("/interessados", async (req, res) => {
-  try {
-    const interessados = await supabaseGet("interessados");
-    res.json({ sucesso: true, total: interessados.length, interessados });
-  } catch (erro) {
-    res.status(500).json({ sucesso: false, erro: erro.message });
-  }
-});
-
-app.get("/campanhas", async (req, res) => {
-  try {
-    const campanhas = await supabaseGet("campanhas");
-    res.json({ sucesso: true, total: campanhas.length, campanhas });
-  } catch (erro) {
-    res.status(500).json({ sucesso: false, erro: erro.message });
-  }
-});
-
-app.post("/campanhas", async (req, res) => {
-  try {
-    const mensagem = String(req.body.mensagem || "").trim();
-
-    if (!mensagem) {
-      return res.status(400).json({ sucesso: false, erro: "Mensagem da campanha é obrigatória" });
-    }
-
-    await supabasePost("campanhas", { mensagem, status: "pendente", enviados: 0 });
-
-    res.json({ sucesso: true, mensagem: "Campanha criada" });
-  } catch (erro) {
-    res.status(500).json({ sucesso: false, erro: erro.message });
-  }
-});
-
-app.get("/webhook", (req, res) => {
-  res.send("Webhook ativo ✅ Use POST para receber mensagens do WhatsApp.");
-});
-
+// ========================
+// TESTE MANUAL
+// ========================
 app.get("/teste", async (req, res) => {
   try {
-    const resultado = await salvarMensagem({
-      telefone: req.query.telefone || "558899999999",
-      mensagem: req.query.mensagem || "quero participar",
-      origem: "teste"
+    const telefone = "558899999999";
+    const mensagem = "quero comprar";
+
+    const interessado = detectarInteresse(mensagem);
+
+    await supabaseUpsert("contatos", {
+      telefone,
+      ultima_mensagem: mensagem,
+      interessado
     });
 
-    res.json({ sucesso: true, ...resultado });
-  } catch (erro) {
-    res.status(500).json({ sucesso: false, erro: erro.message });
-  }
-});
+    await supabaseUpsert("respostas", {
+      telefone,
+      mensagem,
+      interessado
+    });
 
-app.post("/webhook", processarWebhook);
-app.post("/webhook/messages-upsert", processarWebhook);
-
-app.post("/enviar-teste-whatsapp", async (req, res) => {
-  try {
-    const number = req.body.number;
-    const text = req.body.text || "Teste Reino Zap ✅";
-
-    if (!number) {
-      return res.status(400).json({ sucesso: false, erro: "Número obrigatório" });
+    if (interessado) {
+      await supabaseUpsert("interessados", {
+        telefone,
+        origem: "teste"
+      });
     }
 
-    const retorno = await enviarTextoWhatsApp(number, text);
-
-    res.json({ sucesso: true, retorno });
+    res.json({ sucesso: true });
   } catch (erro) {
-    res.status(500).json({ sucesso: false, erro: erro.message });
+    res.json({ sucesso: false, erro: erro.message });
   }
 });
 
+// ========================
+// WEBHOOK REAL
+// ========================
+app.post("/webhook", async (req, res) => {
+  try {
+    console.log("🔥 WEBHOOK RECEBIDO:", JSON.stringify(req.body));
+
+    const telefone =
+      req.body?.data?.key?.remoteJid || "sem-telefone";
+
+    const mensagem =
+      req.body?.data?.message?.conversation ||
+      req.body?.data?.message?.extendedTextMessage?.text ||
+      "";
+
+    const interessado = detectarInteresse(mensagem);
+
+    await supabaseUpsert("contatos", {
+      telefone,
+      ultima_mensagem: mensagem,
+      interessado
+    });
+
+    await supabaseUpsert("respostas", {
+      telefone,
+      mensagem,
+      interessado
+    });
+
+    if (interessado) {
+      await supabaseUpsert("interessados", {
+        telefone,
+        origem: "whatsapp"
+      });
+    }
+
+    res.sendStatus(200);
+  } catch (erro) {
+    console.log("Erro webhook:", erro.message);
+    res.sendStatus(500);
+  }
+});
+
+// ========================
 app.listen(PORT, () => {
-  console.log(`Servidor Reino Zap rodando na porta ${PORT} 🚀`);
+  console.log("Servidor rodando 🚀");
 });
