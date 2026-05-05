@@ -1,7 +1,7 @@
 {
-  "name": "backend-reino-zap",
-  "version": "13.1.0",
-  "type": "module",
+  "name": "reino-zap-v14",
+  "version": "14.0.0",
+  "description": "Reino Zap - motor proprio WhatsApp Baileys",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -10,7 +10,10 @@
     "@whiskeysockets/baileys": "^6.7.18",
     "cors": "^2.8.5",
     "express": "^4.21.2",
-    "node-fetch": "^3.3.2",
+    "pino": "^9.6.0",
     "qrcode": "^1.5.4"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   }
 }
