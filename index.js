@@ -56,6 +56,46 @@ app.get("/webhook", (req, res) => {
   res.send("Webhook existe ✅ Use POST para receber mensagens.");
 });
 
+app.get("/teste", async (req, res) => {
+  try {
+    const telefone = req.query.telefone || "558899999999";
+    const mensagem = req.query.mensagem || "quero participar";
+
+    const interessado = detectarInteresse(mensagem);
+
+    await supabaseInsert("contatos", {
+      telefone,
+      ultima_mensagem: mensagem,
+      interessado
+    });
+
+    await supabaseInsert("respostas", {
+      telefone,
+      mensagem,
+      interessado
+    });
+
+    if (interessado) {
+      await supabaseInsert("interessados", {
+        telefone,
+        origem: "teste"
+      });
+    }
+
+    res.json({
+      sucesso: true,
+      telefone,
+      mensagem,
+      interessado
+    });
+  } catch (erro) {
+    res.status(500).json({
+      sucesso: false,
+      erro: erro.message
+    });
+  }
+});
+
 app.post("/webhook", async (req, res) => {
   try {
     const telefone =
