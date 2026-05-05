@@ -98,38 +98,42 @@ async function enviarTextoEvolution(telefoneEntrada, mensagemEntrada) {
 
   const rota = `${EVOLUTION_URL}/message/sendText/${EVOLUTION_INSTANCE}`;
 
+  // V9: formato correto identificado pela própria Evolution 2.3.7:
+  // body precisa ter a propriedade "text" diretamente.
   const tentativas = [
     {
-      nome: "oficial_textMessage",
+      nome: "v9_text_direto",
       url: rota,
-      body: { number, textMessage: { text }, delay: 1200, linkPreview: false }
+      body: { number, text }
     },
     {
-      nome: "simples_text",
+      nome: "v9_text_com_delay",
       url: rota,
-      body: { number, text, delay: 1200, linkPreview: false }
+      body: { number, text, delay: 1200 }
     },
     {
-      nome: "oficial_sem_delay",
+      nome: "v9_text_sem_55_extra",
       url: rota,
-      body: { number, textMessage: { text } }
-    },
-    {
-      nome: "numero_com_jid",
-      url: rota,
-      body: { number: `${number}@s.whatsapp.net`, textMessage: { text }, delay: 1200, linkPreview: false }
+      body: { number: number.replace(/^55/, "55"), text }
     }
   ];
 
   const resultados = [];
+
   for (const tentativa of tentativas) {
     const retorno = await fetchComTimeout(tentativa.url, {
       method: "POST",
       headers,
       body: JSON.stringify(tentativa.body)
-    }, 35000);
+    }, 60000);
 
-    resultados.push({ nome: tentativa.nome, status: retorno.status, ok: retorno.ok, retorno: retorno.data });
+    resultados.push({
+      nome: tentativa.nome,
+      status: retorno.status,
+      ok: retorno.ok,
+      bodyEnviado: tentativa.body,
+      retorno: retorno.data
+    });
 
     if (retorno.ok) {
       return {
@@ -147,7 +151,7 @@ async function enviarTextoEvolution(telefoneEntrada, mensagemEntrada) {
     sucesso: false,
     telefone: number,
     mensagem: text,
-    erro: "Nenhum formato de envio foi aceito pela Evolution API",
+    erro: "A Evolution não confirmou envio. Veja diagnostico.",
     diagnostico: resultados
   };
 }
@@ -158,8 +162,8 @@ app.get("/status", (req, res) => {
   res.json({
     online: true,
     sistema: "Reino Zap",
-    versao: "8.0.0",
-    modo: "envio-whatsapp-com-diagnostico",
+    versao: "9.0.0",
+    modo: "envio-whatsapp-v9-text-direto",
     evolution: { url: EVOLUTION_URL, instance: EVOLUTION_INSTANCE }
   });
 });
@@ -307,4 +311,4 @@ carregarDados();
 </body></html>`);
 });
 
-app.listen(PORT, () => console.log(`Reino Zap V8 rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Reino Zap V9 rodando na porta ${PORT}`));
