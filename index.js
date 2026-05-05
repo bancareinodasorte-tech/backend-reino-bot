@@ -40,7 +40,24 @@ function limparTelefone(telefone = "") {
     .replace(/\D/g, "");
 }
 
-async function supabaseRequest(tabela, dados, options = {}) {
+async function supabaseGet(tabela) {
+  const resposta = await fetch(`${SUPABASE_URL}/rest/v1/${tabela}?select=*&order=id.desc`, {
+    method: "GET",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`
+    }
+  });
+
+  if (!resposta.ok) {
+    const erro = await resposta.text();
+    throw new Error(`Erro Supabase GET ${tabela}: ${erro}`);
+  }
+
+  return resposta.json();
+}
+
+async function supabasePost(tabela, dados, options = {}) {
   const { upsert = false, conflito = "" } = options;
 
   let url = `${SUPABASE_URL}/rest/v1/${tabela}`;
@@ -64,7 +81,7 @@ async function supabaseRequest(tabela, dados, options = {}) {
 
   if (!resposta.ok) {
     const erro = await resposta.text();
-    throw new Error(`Erro Supabase ${tabela}: ${erro}`);
+    throw new Error(`Erro Supabase POST ${tabela}: ${erro}`);
   }
 }
 
@@ -73,7 +90,7 @@ async function salvarMensagem({ telefone, mensagem, origem }) {
   const textoMensagem = String(mensagem || "");
   const interessado = detectarInteresse(textoMensagem);
 
-  await supabaseRequest(
+  await supabasePost(
     "contatos",
     {
       telefone: telefoneLimpo,
@@ -86,14 +103,14 @@ async function salvarMensagem({ telefone, mensagem, origem }) {
     }
   );
 
-  await supabaseRequest("respostas", {
+  await supabasePost("respostas", {
     telefone: telefoneLimpo,
     mensagem: textoMensagem,
     interessado
   });
 
   if (interessado) {
-    await supabaseRequest("interessados", {
+    await supabasePost("interessados", {
       telefone: telefoneLimpo,
       origem
     });
@@ -107,11 +124,118 @@ async function salvarMensagem({ telefone, mensagem, origem }) {
 }
 
 app.get("/", (req, res) => {
-  res.send("Backend Reino Zap ONLINE 🚀 Supabase conectado ✅");
+  res.send("Backend Reino Zap V1 ONLINE 🚀");
+});
+
+app.get("/status", (req, res) => {
+  res.json({
+    online: true,
+    sistema: "Reino Zap",
+    versao: "1.0.0"
+  });
+});
+
+app.get("/contatos", async (req, res) => {
+  try {
+    const contatos = await supabaseGet("contatos");
+    res.json({ sucesso: true, total: contatos.length, contatos });
+  } catch (erro) {
+    res.status(500).json({ sucesso: false, erro: erro.message });
+  }
+});
+
+app.post("/contatos", async (req, res) => {
+  try {
+    const telefone = limparTelefone(req.body.telefone);
+    const nome = req.body.nome || "";
+    const status = req.body.status || "novo";
+
+    if (!telefone) {
+      return res.status(400).json({
+        sucesso: false,
+        erro: "Telefone obrigatório"
+      });
+    }
+
+    await supabasePost(
+      "contatos",
+      {
+        telefone,
+        nome,
+        status
+      },
+      {
+        upsert: true,
+        conflito: "telefone"
+      }
+    );
+
+    res.json({
+      sucesso: true,
+      mensagem: "Contato salvo",
+      telefone,
+      nome,
+      status
+    });
+  } catch (erro) {
+    res.status(500).json({ sucesso: false, erro: erro.message });
+  }
+});
+
+app.get("/interessados", async (req, res) => {
+  try {
+    const interessados = await supabaseGet("interessados");
+    res.json({
+      sucesso: true,
+      total: interessados.length,
+      interessados
+    });
+  } catch (erro) {
+    res.status(500).json({ sucesso: false, erro: erro.message });
+  }
+});
+
+app.get("/campanhas", async (req, res) => {
+  try {
+    const campanhas = await supabaseGet("campanhas");
+    res.json({
+      sucesso: true,
+      total: campanhas.length,
+      campanhas
+    });
+  } catch (erro) {
+    res.status(500).json({ sucesso: false, erro: erro.message });
+  }
+});
+
+app.post("/campanhas", async (req, res) => {
+  try {
+    const mensagem = String(req.body.mensagem || "").trim();
+
+    if (!mensagem) {
+      return res.status(400).json({
+        sucesso: false,
+        erro: "Mensagem da campanha é obrigatória"
+      });
+    }
+
+    await supabasePost("campanhas", {
+      mensagem,
+      status: "pendente",
+      enviados: 0
+    });
+
+    res.json({
+      sucesso: true,
+      mensagem: "Campanha criada"
+    });
+  } catch (erro) {
+    res.status(500).json({ sucesso: false, erro: erro.message });
+  }
 });
 
 app.get("/webhook", (req, res) => {
-  res.send("Webhook existe ✅ Use POST para receber mensagens.");
+  res.send("Webhook ativo ✅ Use POST para receber mensagens do WhatsApp.");
 });
 
 app.get("/teste", async (req, res) => {
@@ -127,8 +251,6 @@ app.get("/teste", async (req, res) => {
       ...resultado
     });
   } catch (erro) {
-    console.error("Erro no teste:", erro.message);
-
     res.status(500).json({
       sucesso: false,
       erro: erro.message
@@ -177,5 +299,5 @@ app.post("/webhook", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT} 🚀`);
+  console.log(`Servidor Reino Zap rodando na porta ${PORT} 🚀`);
 });
