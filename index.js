@@ -5,14 +5,14 @@ import fetch from "node-fetch";
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
 const PORT = process.env.PORT || 3000;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 function detectarInteresse(mensagem = "") {
-  const texto = mensagem.toLowerCase();
+  const texto = String(mensagem).toLowerCase();
 
   const palavras = [
     "quero",
@@ -24,20 +24,40 @@ function detectarInteresse(mensagem = "") {
     "bilhete",
     "bilhetes",
     "tenho interesse",
-    "vou querer"
+    "vou querer",
+    "sim",
+    "quanto",
+    "chave"
   ];
 
   return palavras.some((p) => texto.includes(p));
 }
 
-async function supabaseInsert(tabela, dados) {
-  const resposta = await fetch(`${SUPABASE_URL}/rest/v1/${tabela}`, {
+function limparTelefone(telefone = "") {
+  return String(telefone)
+    .replace("@s.whatsapp.net", "")
+    .replace("@c.us", "")
+    .replace(/\D/g, "");
+}
+
+async function supabaseRequest(tabela, dados, options = {}) {
+  const { upsert = false, conflito = "" } = options;
+
+  let url = `${SUPABASE_URL}/rest/v1/${tabela}`;
+
+  if (upsert && conflito) {
+    url += `?on_conflict=${conflito}`;
+  }
+
+  const resposta = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       apikey: SUPABASE_KEY,
       Authorization: `Bearer ${SUPABASE_KEY}`,
-      Prefer: "return=minimal"
+      Prefer: upsert
+        ? "resolution=merge-duplicates,return=minimal"
+        : "return=minimal"
     },
     body: JSON.stringify(dados)
   });
@@ -46,6 +66,44 @@ async function supabaseInsert(tabela, dados) {
     const erro = await resposta.text();
     throw new Error(`Erro Supabase ${tabela}: ${erro}`);
   }
+}
+
+async function salvarMensagem({ telefone, mensagem, origem }) {
+  const telefoneLimpo = limparTelefone(telefone);
+  const textoMensagem = String(mensagem || "");
+  const interessado = detectarInteresse(textoMensagem);
+
+  await supabaseRequest(
+    "contatos",
+    {
+      telefone: telefoneLimpo,
+      ultima_mensagem: textoMensagem,
+      interessado
+    },
+    {
+      upsert: true,
+      conflito: "telefone"
+    }
+  );
+
+  await supabaseRequest("respostas", {
+    telefone: telefoneLimpo,
+    mensagem: textoMensagem,
+    interessado
+  });
+
+  if (interessado) {
+    await supabaseRequest("interessados", {
+      telefone: telefoneLimpo,
+      origem
+    });
+  }
+
+  return {
+    telefone: telefoneLimpo,
+    mensagem: textoMensagem,
+    interessado
+  };
 }
 
 app.get("/", (req, res) => {
@@ -58,37 +116,19 @@ app.get("/webhook", (req, res) => {
 
 app.get("/teste", async (req, res) => {
   try {
-    const telefone = req.query.telefone || "558899999999";
-    const mensagem = req.query.mensagem || "quero participar";
-
-    const interessado = detectarInteresse(mensagem);
-
-    await supabaseInsert("contatos", {
-      telefone,
-      ultima_mensagem: mensagem,
-      interessado
+    const resultado = await salvarMensagem({
+      telefone: req.query.telefone || "558899999999",
+      mensagem: req.query.mensagem || "quero participar",
+      origem: "teste"
     });
-
-    await supabaseInsert("respostas", {
-      telefone,
-      mensagem,
-      interessado
-    });
-
-    if (interessado) {
-      await supabaseInsert("interessados", {
-        telefone,
-        origem: "teste"
-      });
-    }
 
     res.json({
       sucesso: true,
-      telefone,
-      mensagem,
-      interessado
+      ...resultado
     });
   } catch (erro) {
+    console.error("Erro no teste:", erro.message);
+
     res.status(500).json({
       sucesso: false,
       erro: erro.message
@@ -103,6 +143,7 @@ app.post("/webhook", async (req, res) => {
       req.body.number ||
       req.body.remoteJid ||
       req.body?.data?.key?.remoteJid ||
+      req.body?.key?.remoteJid ||
       "sem-telefone";
 
     const mensagem =
@@ -111,37 +152,23 @@ app.post("/webhook", async (req, res) => {
       req.body.message ||
       req.body?.data?.message?.conversation ||
       req.body?.data?.message?.extendedTextMessage?.text ||
+      req.body?.message?.conversation ||
+      req.body?.message?.extendedTextMessage?.text ||
       "";
 
-    const interessado = detectarInteresse(mensagem);
-
-    await supabaseInsert("contatos", {
-      telefone,
-      ultima_mensagem: mensagem,
-      interessado
-    });
-
-    await supabaseInsert("respostas", {
+    const resultado = await salvarMensagem({
       telefone,
       mensagem,
-      interessado
+      origem: "whatsapp"
     });
-
-    if (interessado) {
-      await supabaseInsert("interessados", {
-        telefone,
-        origem: "whatsapp"
-      });
-    }
 
     res.json({
       sucesso: true,
-      telefone,
-      mensagem,
-      interessado
+      ...resultado
     });
   } catch (erro) {
     console.error("Erro no webhook:", erro.message);
+
     res.status(500).json({
       sucesso: false,
       erro: erro.message
