@@ -131,8 +131,288 @@ app.get("/status", (req, res) => {
   res.json({
     online: true,
     sistema: "Reino Zap",
-    versao: "1.0.0"
+    versao: "1.1.0"
   });
+});
+
+app.get("/painel", (req, res) => {
+  res.send(`
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Reino Zap - Painel</title>
+  <style>
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family:Arial, sans-serif;
+      background:#0b1220;
+      color:#fff;
+    }
+    header{
+      background:#0f1f3d;
+      padding:18px;
+      text-align:center;
+      border-bottom:3px solid #1d4ed8;
+    }
+    header h1{
+      margin:0;
+      font-size:24px;
+    }
+    header p{
+      margin:6px 0 0;
+      color:#cbd5e1;
+      font-size:14px;
+    }
+    main{
+      padding:15px;
+      max-width:1000px;
+      margin:auto;
+    }
+    .grid{
+      display:grid;
+      grid-template-columns:1fr;
+      gap:15px;
+    }
+    .card{
+      background:#111827;
+      border:1px solid #243047;
+      border-radius:16px;
+      padding:16px;
+      box-shadow:0 8px 25px rgba(0,0,0,.25);
+    }
+    h2{
+      font-size:18px;
+      margin:0 0 12px;
+      color:#93c5fd;
+    }
+    input, textarea, button{
+      width:100%;
+      border-radius:12px;
+      border:0;
+      padding:13px;
+      font-size:15px;
+      margin-bottom:10px;
+    }
+    input, textarea{
+      background:#0b1220;
+      color:#fff;
+      border:1px solid #334155;
+    }
+    textarea{
+      min-height:110px;
+      resize:vertical;
+    }
+    button{
+      background:#2563eb;
+      color:white;
+      font-weight:bold;
+      cursor:pointer;
+    }
+    button:active{
+      transform:scale(.98);
+    }
+    .btn-green{
+      background:#16a34a;
+    }
+    .btn-orange{
+      background:#f97316;
+    }
+    .lista{
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      margin-top:10px;
+    }
+    .item{
+      background:#0b1220;
+      border:1px solid #334155;
+      border-radius:12px;
+      padding:12px;
+      font-size:14px;
+    }
+    .item strong{
+      color:#bfdbfe;
+    }
+    .ok{
+      color:#86efac;
+      font-weight:bold;
+    }
+    .erro{
+      color:#fca5a5;
+      font-weight:bold;
+    }
+    .contador{
+      display:grid;
+      grid-template-columns:1fr 1fr 1fr;
+      gap:10px;
+      margin-bottom:15px;
+    }
+    .box{
+      background:#172554;
+      border-radius:14px;
+      padding:14px;
+      text-align:center;
+    }
+    .box b{
+      font-size:22px;
+      display:block;
+    }
+    .box span{
+      font-size:12px;
+      color:#cbd5e1;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>👑 Reino Zap</h1>
+    <p>Painel de vendas por WhatsApp</p>
+  </header>
+
+  <main>
+    <div class="contador">
+      <div class="box"><b id="totalContatos">0</b><span>Contatos</span></div>
+      <div class="box"><b id="totalInteressados">0</b><span>Interessados</span></div>
+      <div class="box"><b id="totalCampanhas">0</b><span>Campanhas</span></div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Adicionar contato</h2>
+        <input id="nomeContato" placeholder="Nome do cliente (opcional)">
+        <input id="telefoneContato" placeholder="Telefone com DDD. Ex: 558899999999">
+        <button onclick="salvarContato()">Salvar contato</button>
+        <div id="msgContato"></div>
+      </div>
+
+      <div class="card">
+        <h2>Criar campanha</h2>
+        <textarea id="mensagemCampanha" placeholder="Digite a mensagem da campanha. Ex: Hoje tem sorteio de R$ 2.000,00 + 3 giros de R$100,00. Quer participar?"></textarea>
+        <button class="btn-green" onclick="criarCampanha()">Salvar campanha</button>
+        <div id="msgCampanha"></div>
+      </div>
+
+      <div class="card">
+        <h2>Teste de interesse</h2>
+        <input id="telefoneTeste" placeholder="Telefone para teste" value="558899999999">
+        <input id="mensagemTeste" placeholder="Mensagem" value="quero comprar">
+        <button class="btn-orange" onclick="testarMensagem()">Testar mensagem</button>
+        <div id="msgTeste"></div>
+      </div>
+
+      <div class="card">
+        <h2>Interessados</h2>
+        <button onclick="carregarDados()">Atualizar lista</button>
+        <div id="listaInteressados" class="lista"></div>
+      </div>
+
+      <div class="card">
+        <h2>Contatos</h2>
+        <div id="listaContatos" class="lista"></div>
+      </div>
+
+      <div class="card">
+        <h2>Campanhas</h2>
+        <div id="listaCampanhas" class="lista"></div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    async function api(url, options){
+      const r = await fetch(url, options);
+      return await r.json();
+    }
+
+    function mostrar(id, texto, tipo){
+      document.getElementById(id).innerHTML = '<p class="' + tipo + '">' + texto + '</p>';
+    }
+
+    async function salvarContato(){
+      const nome = document.getElementById("nomeContato").value;
+      const telefone = document.getElementById("telefoneContato").value;
+
+      const r = await api("/contatos", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ nome, telefone })
+      });
+
+      if(r.sucesso){
+        mostrar("msgContato", "Contato salvo com sucesso ✅", "ok");
+        document.getElementById("nomeContato").value = "";
+        document.getElementById("telefoneContato").value = "";
+        carregarDados();
+      }else{
+        mostrar("msgContato", r.erro, "erro");
+      }
+    }
+
+    async function criarCampanha(){
+      const mensagem = document.getElementById("mensagemCampanha").value;
+
+      const r = await api("/campanhas", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ mensagem })
+      });
+
+      if(r.sucesso){
+        mostrar("msgCampanha", "Campanha salva com sucesso ✅", "ok");
+        document.getElementById("mensagemCampanha").value = "";
+        carregarDados();
+      }else{
+        mostrar("msgCampanha", r.erro, "erro");
+      }
+    }
+
+    async function testarMensagem(){
+      const telefone = document.getElementById("telefoneTeste").value;
+      const mensagem = encodeURIComponent(document.getElementById("mensagemTeste").value);
+
+      const r = await api("/teste?telefone=" + telefone + "&mensagem=" + mensagem);
+
+      if(r.sucesso){
+        mostrar("msgTeste", "Mensagem registrada. Interessado: " + r.interessado, "ok");
+        carregarDados();
+      }else{
+        mostrar("msgTeste", r.erro, "erro");
+      }
+    }
+
+    async function carregarDados(){
+      const contatos = await api("/contatos");
+      const interessados = await api("/interessados");
+      const campanhas = await api("/campanhas");
+
+      document.getElementById("totalContatos").innerText = contatos.total || 0;
+      document.getElementById("totalInteressados").innerText = interessados.total || 0;
+      document.getElementById("totalCampanhas").innerText = campanhas.total || 0;
+
+      document.getElementById("listaContatos").innerHTML =
+        (contatos.contatos || []).map(c =>
+          '<div class="item"><strong>' + (c.nome || "Sem nome") + '</strong><br>Telefone: ' + c.telefone + '<br>Status: ' + (c.status || "-") + '<br>Última: ' + (c.ultima_mensagem || "-") + '</div>'
+        ).join("") || "<p>Nenhum contato.</p>";
+
+      document.getElementById("listaInteressados").innerHTML =
+        (interessados.interessados || []).map(i =>
+          '<div class="item"><strong>' + i.telefone + '</strong><br>Origem: ' + (i.origem || "-") + '</div>'
+        ).join("") || "<p>Nenhum interessado.</p>";
+
+      document.getElementById("listaCampanhas").innerHTML =
+        (campanhas.campanhas || []).map(c =>
+          '<div class="item"><strong>Status: ' + c.status + '</strong><br>' + c.mensagem + '<br>Enviados: ' + c.enviados + '</div>'
+        ).join("") || "<p>Nenhuma campanha.</p>";
+    }
+
+    carregarDados();
+  </script>
+</body>
+</html>
+  `);
 });
 
 app.get("/contatos", async (req, res) => {
