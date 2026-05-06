@@ -1,442 +1,307 @@
-const express = require('express');
-const cors = require('cors');
-const QRCode = require('qrcode');
-const pino = require('pino');
-const {
-  default: makeWASocket,
+import express from 'express';
+import cors from 'cors';
+import pino from 'pino';
+import QRCode from 'qrcode';
+import {
+  makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion
-} = require('@whiskeysockets/baileys');
+  fetchLatestBaileysVersion,
+  delay
+} from '@whiskeysockets/baileys';
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '20mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
 const PORT = process.env.PORT || 3000;
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-const VERSAO = '14.0.0';
-const VALOR_BILHETE = 2;
-const PIX_CHAVE = '88994943632';
-const PIX_NOME = 'G. DA SILVA';
-const MAX_ENVIO_PADRAO = 20;
-const DELAY_PADRAO = 8000;
+const CONFIG = {
+  sistema: 'Reino Zap PRO',
+  versao: '15.0.0',
+  bilheteValor: 2,
+  pixChave: '88994943632',
+  pixNome: 'G. DA SILVA',
+  atendimentoHumano: true,
+  intervaloPadrao: 8000,
+  limitePadrao: 20
+};
 
 let sock = null;
 let qrAtual = '';
 let qrDataUrl = '';
 let conectado = false;
 let numeroConectado = '';
-let ultimaMensagemRecebida = null;
-let ultimaAtividade = null;
-let enviandoCampanha = false;
-let progressoCampanha = { ativo: false, total: 0, enviados: 0, falhas: 0, status: 'parado' };
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+let ultimaMensagem = null;
+let campanhaRodando = false;
+let campanhaProgresso = { total: 0, enviados: 0, erros: 0, status: 'parado' };
+const memoria = { contatos: new Map(), mensagens: [] };
 
 function limparTelefone(telefone = '') {
-  let t = String(telefone || '')
-    .replace('@s.whatsapp.net', '')
-    .replace('@lid', '')
-    .replace('@c.us', '')
-    .replace(/\D/g, '');
-  if (t && !t.startsWith('55')) t = '55' + t;
-  return t;
+  return String(telefone).replace('@s.whatsapp.net', '').replace('@lid', '').replace(/\D/g, '');
 }
 
-function jidParaTelefone(jid = '') {
-  return limparTelefone(String(jid).split('@')[0]);
+function jidDoNumero(telefone = '') {
+  const limpo = limparTelefone(telefone);
+  return `${limpo}@s.whatsapp.net`;
 }
 
-function normalizarTexto(texto = '') {
-  return String(texto || '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim();
+function moeda(v) {
+  return Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
 
-function detectarInteresse(mensagem = '') {
-  const texto = normalizarTexto(mensagem);
-  const palavras = [
-    'quero', 'comprar', 'participar', 'pix', 'valor', 'manda', 'bilhete', 'bilhetes',
-    'tenho interesse', 'vou querer', 'sim', 'quanto', 'chave', 'pedido', 'comprar'
-  ];
-  return palavras.some((p) => texto.includes(p));
+function textoNormalizado(v = '') {
+  return String(v || '').trim().toLowerCase();
 }
 
-function detectarQuantidade(mensagem = '') {
-  const texto = String(mensagem || '').trim();
-  const match = texto.match(/\b(\d{1,3})\b/);
-  if (!match) return null;
-  const qtd = Number(match[1]);
-  if (!Number.isFinite(qtd) || qtd <= 0 || qtd > 500) return null;
-  return qtd;
+function detectarInteresse(texto = '') {
+  const t = textoNormalizado(texto);
+  if (!t) return false;
+  const palavras = ['quero', 'comprar', 'participar', 'bilhete', 'bilhetes', 'pix', 'valor', 'manda', 'sim', 'vou querer', 'tenho interesse', 'quanto', 'pode ser', 'ok'];
+  return palavras.some(p => t.includes(p));
 }
 
-function detectarComprovanteTexto(mensagem = '') {
-  const texto = normalizarTexto(mensagem);
-  const palavras = ['paguei', 'pago', 'comprovante', 'enviei', 'pix feito', 'feito', 'pagamento feito'];
-  return palavras.some((p) => texto.includes(p));
+function detectarQuantidade(texto = '') {
+  const t = textoNormalizado(texto);
+  const m = t.match(/\b(\d{1,4})\b/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0 || n > 1000) return null;
+  return n;
 }
 
-function detectarDadosCliente(mensagem = '') {
-  const texto = normalizarTexto(mensagem);
-  return texto.includes('nome') || texto.includes('telefone') || texto.includes('contato');
+function detectarComprovante(msg, texto = '') {
+  const m = msg?.message || {};
+  if (m.imageMessage || m.documentMessage) return true;
+  const t = textoNormalizado(texto);
+  return ['paguei', 'pago', 'comprovante', 'enviei', 'transferi', 'pix feito'].some(p => t.includes(p));
+}
+
+function detectarPdfDoAtendente(msg) {
+  const m = msg?.message || {};
+  return Boolean(msg?.key?.fromMe && m.documentMessage);
 }
 
 function extrairTextoMensagem(message = {}) {
-  return (
-    message.conversation ||
+  return message.conversation ||
     message.extendedTextMessage?.text ||
     message.imageMessage?.caption ||
-    message.videoMessage?.caption ||
     message.documentMessage?.caption ||
-    ''
-  );
+    message.videoMessage?.caption ||
+    '';
 }
 
-function tipoMensagem(message = {}) {
-  if (message.imageMessage) return 'imagem';
-  if (message.documentMessage) return 'documento';
-  if (message.videoMessage) return 'video';
-  if (message.audioMessage) return 'audio';
-  if (message.stickerMessage) return 'figurinha';
-  return 'texto';
+function respostaQuantidade(qtd) {
+  const total = qtd * CONFIG.bilheteValor;
+  return `Perfeito! 🎟️\n\nVocê escolheu: ${qtd} bilhete${qtd > 1 ? 's' : ''}\n\n💰 Total: ${moeda(total)}\n\n📲 Pagamento via Pix:\nChave: ${CONFIG.pixChave}\nNome: ${CONFIG.pixNome}\n\n⚠️ Envie o comprovante aqui para confirmar seu pedido.`;
 }
 
-function escolherMensagem(mensagens = []) {
-  const limpas = mensagens.map((m) => String(m || '').trim()).filter(Boolean);
-  if (!limpas.length) return '';
-  return limpas[Math.floor(Math.random() * limpas.length)];
+function perguntaQuantidade() {
+  return `Perfeito! 🎟️\n\nQuantos bilhetes você deseja comprar?\nDigite apenas o número.\n\nExemplo: 1, 2, 5, 10...`;
 }
 
-async function supabaseRequest(method, tabela, body = null, query = '') {
-  if (!SUPABASE_URL || !SUPABASE_KEY) {
-    throw new Error('SUPABASE_URL ou SUPABASE_KEY ausente no Render.');
+function respostaComprovante() {
+  return `Recebido! ✅\n\n- Preencha os dados\nNOME:\nTELEFONE:\n\n⚠️ Aguarde o comprovante dos seus bilhetes`;
+}
+
+function agradecimentoFinal() {
+  return `REINO DA SORTE AGRADECE SUA COMPRA\n\n🍀 Boa Sorte 🍀`;
+}
+
+async function supabase(method, path, body = null) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return null;
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      Prefer: 'resolution=merge-duplicates,return=representation'
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if (!r.ok) {
+    const e = await r.text();
+    console.log('Supabase erro:', method, path, e);
+    return null;
   }
-  const url = `${SUPABASE_URL}/rest/v1/${tabela}${query}`;
-  const headers = {
-    apikey: SUPABASE_KEY,
-    Authorization: `Bearer ${SUPABASE_KEY}`,
-    'Content-Type': 'application/json'
+  if (r.status === 204) return null;
+  try { return await r.json(); } catch { return null; }
+}
+
+async function salvarContato({ telefone, nome = '', status = 'novo', ultima_mensagem = '', interessado = false, quantidade = null, comprovante = false }) {
+  const tel = limparTelefone(telefone);
+  if (!tel) return;
+  const atual = memoria.contatos.get(tel) || {};
+  const contato = {
+    telefone: tel,
+    nome: nome || atual.nome || '',
+    status: status || atual.status || 'novo',
+    ultima_mensagem: ultima_mensagem || atual.ultima_mensagem || '',
+    interessado: Boolean(interessado || atual.interessado),
+    quantidade: quantidade || atual.quantidade || null,
+    comprovante: Boolean(comprovante || atual.comprovante)
   };
-  if (method === 'POST' || method === 'PATCH') {
-    headers.Prefer = 'resolution=merge-duplicates,return=representation';
-  }
-  const resp = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
-  const text = await resp.text();
-  let data = null;
-  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-  if (!resp.ok) {
-    throw new Error(`Supabase ${method} ${tabela}: ${typeof data === 'string' ? data : JSON.stringify(data)}`);
-  }
-  return data;
+  memoria.contatos.set(tel, contato);
+  await supabase('POST', 'contatos?on_conflict=telefone', contato);
+}
+
+async function salvarResposta({ telefone, mensagem, interessado = false }) {
+  const tel = limparTelefone(telefone);
+  memoria.mensagens.unshift({ telefone: tel, mensagem, interessado, criado_em: new Date().toISOString() });
+  memoria.mensagens = memoria.mensagens.slice(0, 200);
+  await supabase('POST', 'respostas', { telefone: tel, mensagem, interessado });
+  if (interessado) await supabase('POST', 'interessados', { telefone: tel, origem: 'whatsapp' });
 }
 
 async function listarContatos() {
-  try {
-    return await supabaseRequest('GET', 'contatos', null, '?select=*&order=id.desc');
-  } catch (e) {
-    console.log('Erro listarContatos:', e.message);
-    return [];
-  }
-}
-
-async function salvarContato({ telefone, nome = '', status = 'novo', ultima_mensagem = '', interessado = false }) {
-  const tel = limparTelefone(telefone);
-  if (!tel) throw new Error('Telefone obrigatório');
-
-  const dados = { telefone: tel, nome, status, ultima_mensagem, interessado };
-  try {
-    return await supabaseRequest('POST', 'contatos', dados, '?on_conflict=telefone');
-  } catch (e) {
-    console.log('Falha salvar contato completo, tentando mínimo:', e.message);
-    return await supabaseRequest('POST', 'contatos', { telefone: tel, nome, ultima_mensagem, interessado }, '?on_conflict=telefone');
-  }
-}
-
-async function atualizarStatusContato(telefone, status, extra = {}) {
-  const tel = limparTelefone(telefone);
-  try {
-    const body = { status, ...extra };
-    return await supabaseRequest('PATCH', 'contatos', body, `?telefone=eq.${encodeURIComponent(tel)}`);
-  } catch (e) {
-    console.log('Falha atualizar status:', e.message);
-    return null;
-  }
-}
-
-async function registrarResposta({ telefone, mensagem, interessado = false, tipo = 'texto', status = '' }) {
-  try {
-    await supabaseRequest('POST', 'respostas', { telefone: limparTelefone(telefone), mensagem, interessado }, '');
-  } catch (e) {
-    console.log('Falha registrar resposta:', e.message);
-  }
-  if (interessado) {
-    try {
-      await supabaseRequest('POST', 'interessados', { telefone: limparTelefone(telefone), origem: 'whatsapp' }, '');
-    } catch (e) {
-      console.log('Falha registrar interessado:', e.message);
-    }
-  }
+  const data = await supabase('GET', 'contatos?select=*&order=id.desc');
+  if (Array.isArray(data)) return data;
+  return Array.from(memoria.contatos.values()).reverse();
 }
 
 async function enviarTexto(telefone, texto) {
   if (!sock || !conectado) throw new Error('WhatsApp não conectado');
-  const numero = limparTelefone(telefone);
-  const candidatos = [];
-  if (numero) candidatos.push(numero);
-  if (numero.startsWith('55') && numero.length === 13 && numero[4] === '9') {
-    candidatos.push(numero.slice(0, 4) + numero.slice(5));
-  }
-  if (numero.startsWith('55') && numero.length === 12) {
-    candidatos.push(numero.slice(0, 4) + '9' + numero.slice(4));
-  }
-
-  let ultimoErro = null;
-  for (const n of [...new Set(candidatos)]) {
-    try {
-      const onwa = await sock.onWhatsApp(n);
-      const jid = onwa?.[0]?.jid || `${n}@s.whatsapp.net`;
-      const resposta = await sock.sendMessage(jid, { text: texto });
-      return { numeroOriginal: numero, numeroUsado: n, jid, resposta };
-    } catch (e) {
-      ultimoErro = e;
-    }
-  }
-  throw ultimoErro || new Error('Falha ao enviar mensagem');
-}
-
-function textoPerguntarQuantidade() {
-  return `Perfeito! 🎟️\n\nQuantos bilhetes você deseja?\nDigite apenas o número.\n\nExemplo: 1, 2, 5, 10...`;
-}
-
-function textoPix(qtd) {
-  const total = qtd * VALOR_BILHETE;
-  return `Perfeito! 🎟️\n\nVocê escolheu: ${qtd} bilhete${qtd > 1 ? 's' : ''}\n\n💰 Total: R$ ${total.toFixed(2).replace('.', ',')}\n\n📲 Pagamento via Pix:\nChave: ${PIX_CHAVE}\nNome: ${PIX_NOME}\n\n⚠️ Envie o comprovante aqui para confirmar seu pedido.`;
-}
-
-function textoComprovanteRecebido() {
-  return `Recebido! ✅\n\n- Preencha os dados\nNOME:\nTELEFONE:\n\n⚠️ Aguarde o comprovante dos seus bilhetes`;
-}
-
-function textoDadosRecebidos() {
-  return `Dados recebidos! ✅\n\nAguarde enquanto seu pedido é finalizado.`;
-}
-
-function textoAgradecimento() {
-  return `REINO DA SORTE AGRADECE SUA COMPRA\n\n🍀 Boa Sorte 🍀`;
-}
-
-async function processarMensagemEntrada(msg) {
-  try {
-    const key = msg.key || {};
-    const message = msg.message || {};
-    const fromMe = !!key.fromMe;
-    const jid = key.remoteJid || '';
-    if (!jid || jid.includes('@g.us')) return;
-
-    const telefone = jidParaTelefone(jid);
-    const texto = extrairTextoMensagem(message);
-    const tipo = tipoMensagem(message);
-    const quantidade = detectarQuantidade(texto);
-    const interessado = detectarInteresse(texto) || !!quantidade || tipo !== 'texto';
-
-    ultimaMensagemRecebida = {
-      de: jid,
-      telefone,
-      mensagem: texto || `[${tipo}]`,
-      tipo,
-      interessado,
-      quantidade,
-      comprovante: tipo === 'imagem' || tipo === 'documento' || detectarComprovanteTexto(texto),
-      data: new Date().toISOString()
-    };
-    ultimaAtividade = ultimaMensagemRecebida.data;
-
-    if (fromMe) {
-      if (message.documentMessage) {
-        await enviarTexto(telefone, textoAgradecimento()).catch((e) => console.log('Falha agradecimento:', e.message));
-        await atualizarStatusContato(telefone, 'finalizado');
-      }
-      return;
-    }
-
-    let status = interessado ? 'interessado' : 'novo';
-    if (quantidade) status = 'aguardando_pagamento';
-    if (ultimaMensagemRecebida.comprovante) status = 'aguardando_dados';
-    if (detectarDadosCliente(texto)) status = 'aguardando_finalizacao';
-
-    await salvarContato({ telefone, nome: '', status, ultima_mensagem: texto || `[${tipo}]`, interessado });
-    await registrarResposta({ telefone, mensagem: texto || `[${tipo}]`, interessado, tipo, status });
-
-    if (ultimaMensagemRecebida.comprovante) {
-      await enviarTexto(telefone, textoComprovanteRecebido());
-      return;
-    }
-
-    if (quantidade) {
-      await enviarTexto(telefone, textoPix(quantidade));
-      return;
-    }
-
-    if (interessado) {
-      await enviarTexto(telefone, textoPerguntarQuantidade());
-      return;
-    }
-  } catch (e) {
-    console.log('Erro processar mensagem:', e.message);
-  }
+  const jid = jidDoNumero(telefone);
+  const existe = await sock.onWhatsApp(jid);
+  const jidFinal = existe?.[0]?.jid || jid;
+  const resp = await sock.sendMessage(jidFinal, { text: texto });
+  return { jid: jidFinal, resposta: resp };
 }
 
 async function iniciarWhatsApp() {
-  try {
-    const { state, saveCreds } = await useMultiFileAuthState('./auth_reino_zap');
-    const { version } = await fetchLatestBaileysVersion();
+  const { state, saveCreds } = await useMultiFileAuthState('./auth');
+  const { version } = await fetchLatestBaileysVersion();
+  sock = makeWASocket({
+    version,
+    auth: state,
+    printQRInTerminal: false,
+    logger: pino({ level: 'silent' }),
+    browser: ['Reino Zap', 'Chrome', '15.0.0']
+  });
 
-    sock = makeWASocket({
-      version,
-      logger: pino({ level: 'silent' }),
-      auth: state,
-      printQRInTerminal: false,
-      browser: ['Reino Zap', 'Chrome', '14.0.0']
-    });
+  sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect, qr } = update;
-      if (qr) {
-        qrAtual = qr;
-        qrDataUrl = await QRCode.toDataURL(qr);
-        conectado = false;
-      }
-      if (connection === 'open') {
-        conectado = true;
-        qrAtual = '';
-        qrDataUrl = '';
-        numeroConectado = sock.user?.id || '';
-        console.log('WhatsApp conectado:', numeroConectado);
-      }
-      if (connection === 'close') {
-        conectado = false;
-        const statusCode = lastDisconnect?.error?.output?.statusCode;
-        const deveReconectar = statusCode !== DisconnectReason.loggedOut;
-        console.log('WhatsApp desconectado. Reconectar:', deveReconectar, 'status:', statusCode);
-        if (deveReconectar) setTimeout(iniciarWhatsApp, 3000);
-      }
-    });
-
-    sock.ev.on('messages.upsert', async ({ messages }) => {
-      for (const m of messages || []) {
-        if (m.message) await processarMensagemEntrada(m);
-      }
-    });
-  } catch (e) {
-    console.log('Erro iniciar WhatsApp:', e.message);
-    setTimeout(iniciarWhatsApp, 5000);
-  }
-}
-
-function renderPainel() {
-  return `<!DOCTYPE html>
-<html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Reino Zap V14</title><style>
-*{box-sizing:border-box}body{margin:0;background:#0b1428;color:#fff;font-family:Arial,sans-serif}header{background:#182a57;padding:34px 18px;text-align:center;border-bottom:5px solid #4169f6}h1{margin:0;font-size:38px}header p{font-size:17px;margin:10px 0 0}.wrap{max-width:760px;margin:auto;padding:18px}.card{background:#151d35;border:1px solid #34415f;border-radius:18px;margin:18px 0;padding:20px}h2{color:#a9c8ff;font-size:26px;margin-top:0}input,textarea,select,button{width:100%;padding:15px;border-radius:14px;border:1px solid #415070;background:#0e172b;color:#fff;font-size:16px;margin:8px 0}textarea{min-height:110px}button{border:0;background:#4969e8;font-weight:bold;cursor:pointer}.green{background:#16a34a}.orange{background:#ea6d22}.red{background:#d72835}.status{color:#86efac;font-weight:bold}.box{background:#070c1d;border-radius:14px;padding:14px;white-space:pre-wrap;color:#fffbe0;overflow:auto}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.mini{background:#071024;border:1px solid #34415f;border-radius:14px;padding:12px;margin:8px 0}.tag{display:inline-block;padding:5px 9px;border-radius:12px;background:#243866;color:#bcd2ff;font-size:12px}.warn{color:#fde68a}img.qr{width:100%;max-width:330px;background:#fff;padding:10px;border-radius:14px}small{color:#cbd5e1}@media(max-width:620px){h1{font-size:34px}.grid{grid-template-columns:1fr}}</style></head>
-<body><header><h1>👑 Reino Zap</h1><p>Painel profissional de vendas por WhatsApp V14</p></header>
-<div class="wrap">
-<div class="card"><h2>1. WhatsApp</h2><div id="waStatus">Carregando...</div><button onclick="carregar()">Atualizar status</button><div id="qr"></div></div>
-<div class="card"><h2>2. Campanha / Oferta</h2><small>Use 2 ou mais textos separados por --- para embaralhar e reduzir risco de bloqueio.</small><textarea id="campanha">🎟️ HOJE TEM REINO DA SORTE!\n\nBilhete por apenas R$ 2,00.\n\nResponda com a quantidade que deseja comprar.\nEx: 1, 2, 5, 10...\n\n🍀 Boa sorte!\n---\n🍀 Bora participar do sorteio de hoje?\n\n🎟️ Bilhete: R$ 2,00\n\nResponda só com a quantidade de bilhetes.\nEx: 2, 5 ou 10.</textarea><input id="limite" value="20" placeholder="Quantidade máxima por envio"><input id="delay" value="8000" placeholder="Intervalo em milissegundos"><select id="filtro"><option value="todos">Todos</option><option value="novo">Novos</option><option value="interessado">Interessados</option><option value="sem_resposta">Sem resposta</option><option value="aguardando_pagamento">Aguardando pagamento</option></select><button class="red" onclick="enviarCampanha()">Enviar campanha</button><div id="campanhaResp" class="box"></div></div>
-<div class="card"><h2>3. Adicionar contato</h2><input id="nome" placeholder="Nome opcional"><input id="telefone" placeholder="Telefone com DDD"><button onclick="salvarContato()">Salvar contato</button><div id="contatoResp" class="box"></div></div>
-<div class="card"><h2>4. Fluxo automático</h2><div class="box">Bilhete: R$ 2,00\nPix: 88994943632\nNome no Pix: G. DA SILVA\n\nCliente responde quantidade → sistema calcula valor e envia Pix.\nCliente manda imagem/PDF/paguei → sistema pede NOME e TELEFONE.\nAtendente envia PDF → sistema agradece.</div></div>
-<div class="card"><h2>5. Última mensagem recebida</h2><div id="ultima" class="box">-</div></div>
-<div class="card"><h2>6. Clientes</h2><button onclick="carregarContatos()">Atualizar clientes</button><div id="resumo" class="grid"></div><div id="lista"></div></div>
-</div>
-<script>
-async function j(url,opt){const r=await fetch(url,opt);return await r.json()}
-function esc(x){return String(x||'').replace(/[&<>]/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[s]))}
-async function carregar(){const s=await j('/api/status');document.getElementById('waStatus').innerHTML=s.conectado?'<p class=status>WhatsApp conectado ✅<br>'+esc(s.numeroConectado)+'</p>':'<p class=warn>WhatsApp desconectado. Escaneie o QR.</p>';document.getElementById('ultima').textContent=JSON.stringify(s.ultimaMensagemRecebida||'-',null,2);document.getElementById('qr').innerHTML=s.qrDataUrl?'<img class=qr src="'+s.qrDataUrl+'">':'<small>Sem QR no momento.</small>';carregarContatos()}
-async function salvarContato(){const r=await j('/api/contatos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nome:document.getElementById('nome').value,telefone:document.getElementById('telefone').value})});document.getElementById('contatoResp').textContent=JSON.stringify(r,null,2);carregarContatos()}
-async function enviarCampanha(){document.getElementById('campanhaResp').textContent='Enviando...';const mensagens=document.getElementById('campanha').value.split('---');const r=await j('/api/campanha/enviar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mensagens,limite:Number(document.getElementById('limite').value||20),delayMs:Number(document.getElementById('delay').value||8000),filtro:document.getElementById('filtro').value})});document.getElementById('campanhaResp').textContent=JSON.stringify(r,null,2);carregarContatos()}
-async function carregarContatos(){const r=await j('/api/contatos');const contatos=r.contatos||[];const por={novo:0,interessado:0,aguardando_pagamento:0,aguardando_dados:0,aguardando_finalizacao:0,finalizado:0};contatos.forEach(c=>{por[c.status||'novo']=(por[c.status||'novo']||0)+1});document.getElementById('resumo').innerHTML=Object.keys(por).map(k=>'<div class=mini><b>'+por[k]+'</b><br><span class=tag>'+k+'</span></div>').join('');document.getElementById('lista').innerHTML=contatos.map(c=>'<div class=mini><b>'+esc(c.nome||'Sem nome')+'</b><br>'+esc(c.telefone)+'<br><span class=tag>'+esc(c.status||'novo')+'</span><br>Última: '+esc(c.ultima_mensagem||'-')+'</div>').join('')||'<p>Nenhum contato.</p>'}
-carregar();setInterval(carregar,15000)
-</script></body></html>`;
-}
-
-app.get('/', (req, res) => res.redirect('/painel'));
-app.get('/painel', (req, res) => res.send(renderPainel()));
-app.get('/status', (req, res) => res.json({ online: true, sistema: 'Reino Zap', versao: VERSAO, motor: 'baileys', conectado, numeroConectado, temQr: !!qrDataUrl, ultimaMensagemRecebida }));
-app.get('/api/status', (req, res) => res.json({ online: true, versao: VERSAO, conectado, numeroConectado, qrDataUrl, ultimaMensagemRecebida, progressoCampanha }));
-
-app.get('/api/contatos', async (req, res) => {
-  const contatos = await listarContatos();
-  res.json({ sucesso: true, total: contatos.length, contatos });
-});
-
-app.post('/api/contatos', async (req, res) => {
-  try {
-    const r = await salvarContato({ telefone: req.body.telefone, nome: req.body.nome || '', status: req.body.status || 'novo' });
-    res.json({ sucesso: true, contato: r });
-  } catch (e) {
-    res.status(500).json({ sucesso: false, erro: e.message });
-  }
-});
-
-app.post('/api/campanha/enviar', async (req, res) => {
-  if (enviandoCampanha) return res.status(409).json({ sucesso: false, erro: 'Já existe campanha em envio.' });
-  try {
-    const mensagens = Array.isArray(req.body.mensagens) ? req.body.mensagens : [req.body.mensagem || ''];
-    const limite = Math.min(Number(req.body.limite || MAX_ENVIO_PADRAO), 500);
-    const delayMs = Math.max(Number(req.body.delayMs || DELAY_PADRAO), 2000);
-    const filtro = req.body.filtro || 'todos';
-    const contatos = await listarContatos();
-    let alvos = contatos.filter((c) => c.telefone);
-    if (filtro !== 'todos') alvos = alvos.filter((c) => (c.status || 'novo') === filtro);
-    alvos = alvos.slice(0, limite);
-
-    enviandoCampanha = true;
-    progressoCampanha = { ativo: true, total: alvos.length, enviados: 0, falhas: 0, status: 'enviando' };
-    const resultados = [];
-    for (const c of alvos) {
-      const texto = escolherMensagem(mensagens);
-      if (!texto) continue;
-      try {
-        const envio = await enviarTexto(c.telefone, texto);
-        progressoCampanha.enviados++;
-        resultados.push({ telefone: c.telefone, sucesso: true, jid: envio.jid });
-        await atualizarStatusContato(c.telefone, c.status || 'sem_resposta', { ultima_mensagem: texto });
-      } catch (e) {
-        progressoCampanha.falhas++;
-        resultados.push({ telefone: c.telefone, sucesso: false, erro: e.message });
-      }
-      await sleep(delayMs);
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+    if (qr) {
+      qrAtual = qr;
+      qrDataUrl = await QRCode.toDataURL(qr);
+      conectado = false;
     }
-    progressoCampanha.status = 'finalizado';
-    progressoCampanha.ativo = false;
-    enviandoCampanha = false;
-    res.json({ sucesso: true, total: alvos.length, resultados, progressoCampanha });
-  } catch (e) {
-    enviandoCampanha = false;
-    progressoCampanha.ativo = false;
-    res.status(500).json({ sucesso: false, erro: e.message });
+    if (connection === 'open') {
+      conectado = true;
+      qrAtual = '';
+      qrDataUrl = '';
+      numeroConectado = sock.user?.id || '';
+      console.log('WhatsApp conectado:', numeroConectado);
+    }
+    if (connection === 'close') {
+      conectado = false;
+      const reason = lastDisconnect?.error?.output?.statusCode;
+      console.log('WhatsApp desconectado:', reason);
+      if (reason !== DisconnectReason.loggedOut) setTimeout(iniciarWhatsApp, 3000);
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    for (const msg of messages || []) {
+      try {
+        if (!msg.message) continue;
+        const fromMe = Boolean(msg.key?.fromMe);
+        const jid = msg.key?.remoteJid || '';
+        const telefone = limparTelefone(jid);
+        const texto = extrairTextoMensagem(msg.message);
+        const comprovante = detectarComprovante(msg, texto);
+        const qtd = detectarQuantidade(texto);
+        const interessado = detectarInteresse(texto) || Boolean(qtd);
+
+        ultimaMensagem = { de: jid, telefone, mensagem: texto || '[mídia]', tipo: comprovante ? 'comprovante/midia' : 'texto', interessado, quantidade: qtd, comprovante, data: new Date().toISOString() };
+
+        if (fromMe) {
+          if (detectarPdfDoAtendente(msg)) {
+            await enviarTexto(telefone, agradecimentoFinal());
+            await salvarContato({ telefone, status: 'finalizado', ultima_mensagem: '[PDF enviado pelo atendente]' });
+          }
+          continue;
+        }
+
+        await salvarResposta({ telefone, mensagem: texto || '[mídia/comprovante]', interessado });
+
+        if (comprovante) {
+          await salvarContato({ telefone, status: 'aguardando_dados', ultima_mensagem: texto || '[comprovante]', interessado: true, comprovante: true });
+          await enviarTexto(telefone, respostaComprovante());
+          continue;
+        }
+
+        if (qtd) {
+          await salvarContato({ telefone, status: 'aguardando_pagamento', ultima_mensagem: texto, interessado: true, quantidade: qtd });
+          await enviarTexto(telefone, respostaQuantidade(qtd));
+          continue;
+        }
+
+        if (interessado) {
+          await salvarContato({ telefone, status: 'interessado', ultima_mensagem: texto, interessado: true });
+          await enviarTexto(telefone, perguntaQuantidade());
+        } else {
+          await salvarContato({ telefone, status: 'respondeu', ultima_mensagem: texto, interessado: false });
+        }
+      } catch (e) { console.log('Erro processando mensagem:', e.message); }
+    }
+  });
+}
+
+iniciarWhatsApp().catch(e => console.log('Erro ao iniciar WhatsApp:', e.message));
+
+app.get('/status', (req, res) => res.json({ online: true, sistema: CONFIG.sistema, versao: CONFIG.versao, conectado, numeroConectado, temQr: Boolean(qrDataUrl), ultimaMensagemRecebida: ultimaMensagem, campanhaProgresso }));
+app.get('/qr', (req, res) => res.json({ conectado, numeroConectado, qr: qrDataUrl }));
+app.get('/api/contatos', async (req, res) => res.json({ sucesso: true, contatos: await listarContatos() }));
+app.post('/api/contatos', async (req, res) => { await salvarContato({ telefone: req.body.telefone, nome: req.body.nome, status: 'novo' }); res.json({ sucesso: true }); });
+app.post('/api/enviar', async (req, res) => { try { const envio = await enviarTexto(req.body.telefone, req.body.mensagem); res.json({ sucesso: true, envio }); } catch (e) { res.status(500).json({ sucesso: false, erro: e.message }); } });
+app.post('/api/campanha', async (req, res) => {
+  if (campanhaRodando) return res.status(409).json({ sucesso: false, erro: 'Campanha já está rodando' });
+  campanhaRodando = true;
+  const contatos = await listarContatos();
+  const textos = String(req.body.mensagem || '').split('---').map(t => t.trim()).filter(Boolean);
+  const limite = Number(req.body.limite || CONFIG.limitePadrao);
+  const intervalo = Number(req.body.intervalo || CONFIG.intervaloPadrao);
+  const alvo = contatos.slice(0, limite);
+  campanhaProgresso = { total: alvo.length, enviados: 0, erros: 0, status: 'rodando' };
+  res.json({ sucesso: true, mensagem: 'Campanha iniciada', total: alvo.length });
+  for (const c of alvo) {
+    try {
+      const texto = textos[Math.floor(Math.random() * textos.length)] || 'HOJE TEM REINO DA SORTE! 🎟️\n\nBilhete por apenas R$ 2,00.\n\nResponda com a quantidade que deseja comprar.';
+      await enviarTexto(c.telefone, texto);
+      campanhaProgresso.enviados++;
+      await delay(intervalo);
+    } catch { campanhaProgresso.erros++; }
   }
+  campanhaProgresso.status = 'finalizada'; campanhaRodando = false;
 });
 
-app.post('/api/enviar', async (req, res) => {
-  try {
-    const envio = await enviarTexto(req.body.telefone, req.body.mensagem || 'Teste Reino Zap ✅');
-    res.json({ sucesso: true, envio });
-  } catch (e) {
-    res.status(500).json({ sucesso: false, erro: e.message });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`Reino Zap V14 ativo na porta ${PORT}`);
-});
-
-iniciarWhatsApp();
+function html() { return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Reino Zap PRO</title><style>
+*{box-sizing:border-box}body{margin:0;background:#081427;color:#fff;font-family:Arial,sans-serif}header{background:#172554;padding:24px 16px;text-align:center;border-bottom:4px solid #3b63ff}h1{font-size:36px;margin:0}main{max-width:1180px;margin:auto;padding:18px}.grid{display:grid;grid-template-columns:1fr;gap:16px}.card{background:#151c31;border:1px solid #33415f;border-radius:18px;padding:18px}h2{color:#aac7ff;font-size:25px;margin:0 0 14px}input,textarea,select,button{width:100%;padding:15px;border-radius:13px;border:1px solid #40506e;background:#0a1426;color:#fff;font-size:16px;margin:8px 0}textarea{min-height:120px}button{border:0;background:#4f6bed;font-weight:bold;cursor:pointer}.danger{background:#d12d37}.orange{background:#e96f23}.box{background:#090e1e;border-radius:12px;padding:14px;margin-top:10px;white-space:pre-wrap}.kpi{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.item{background:#0a1426;border:1px solid #3a4a68;border-radius:14px;padding:13px;margin-top:10px}.tag{display:inline-block;background:#3d4d89;padding:5px 10px;border-radius:99px;font-size:12px}.ok{color:#9dff91;font-weight:bold}.nav{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0}.nav button{background:#22345e}@media(min-width:900px){.grid{grid-template-columns:1fr 1fr}.wide{grid-column:1/3}}
+</style></head><body><header><h1>👑 Reino Zap PRO</h1><p>Painel profissional de vendas por WhatsApp V15</p></header><main>
+<div class="nav"><button onclick="rolar('dash')">Dashboard</button><button onclick="rolar('camp')">Campanhas</button><button onclick="rolar('clientes')">Clientes</button><button onclick="rolar('fluxo')">Fluxo</button></div>
+<div class="grid">
+<section class="card" id="dash"><h2>1. WhatsApp</h2><div id="status">Carregando...</div><button onclick="atualizar()">Atualizar status</button><div id="qr"></div></section>
+<section class="card"><h2>2. Envio rápido</h2><input id="telRapido" placeholder="Telefone"><textarea id="msgRapida">Teste Reino Zap ✅</textarea><button class="orange" onclick="enviarRapido()">Enviar mensagem</button><div id="retRapido" class="box"></div></section>
+<section class="card wide" id="camp"><h2>3. Campanha / Oferta</h2><p>Use 2 ou mais textos separados por --- para embaralhar.</p><textarea id="msgCamp">🎟️ HOJE TEM REINO DA SORTE!\n\nBilhete por apenas R$ 2,00.\n\nResponda com a quantidade que deseja comprar.\n---\n🍀 Quer participar do Reino da Sorte hoje?\n\nBilhete R$ 2,00. Responda só com a quantidade.</textarea><input id="limite" value="20" placeholder="Limite"><input id="intervalo" value="8000" placeholder="Intervalo ms"><button class="danger" onclick="campanha()">Enviar campanha</button><div id="retCamp" class="box"></div></section>
+<section class="card"><h2>4. Adicionar contato</h2><input id="nome" placeholder="Nome"><input id="telefone" placeholder="Telefone"><button onclick="addContato()">Salvar contato</button><div id="retContato" class="box"></div></section>
+<section class="card" id="fluxo"><h2>5. Fluxo automático</h2><div class="box">Bilhete: R$ 2,00\nPix: 88994943632\nNome no Pix: G. DA SILVA\n\nCliente responde quantidade → sistema envia Pix.\nCliente manda imagem/PDF/paguei → sistema pede NOME e TELEFONE.\nAtendente envia PDF → sistema agradece.</div></section>
+<section class="card wide"><h2>6. Última mensagem recebida</h2><div id="ultima" class="box">-</div></section>
+<section class="card wide" id="clientes"><h2>7. Clientes</h2><button onclick="carregarClientes()">Atualizar clientes</button><div class="kpi" id="kpis"></div><div id="lista"></div></section>
+</div></main><script>
+const j=x=>JSON.stringify(x,null,2);function rolar(id){document.getElementById(id).scrollIntoView({behavior:'smooth'})}
+async function api(u,o){let r=await fetch(u,o);return await r.json()}async function atualizar(){let s=await api('/status');document.getElementById('status').innerHTML=s.conectado?'<p class="ok">WhatsApp conectado ✅<br>'+s.numeroConectado+'</p>':'<p>WhatsApp desconectado</p>';document.getElementById('ultima').innerText=j(s.ultimaMensagemRecebida||'-');let q=await api('/qr');document.getElementById('qr').innerHTML=q.qr?'<img src="'+q.qr+'" style="width:100%;max-width:300px">':'Sem QR no momento.';carregarClientes()}
+async function enviarRapido(){let r=await api('/api/enviar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({telefone:telRapido.value,mensagem:msgRapida.value})});retRapido.innerText=j(r)}
+async function addContato(){let r=await api('/api/contatos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nome:nome.value,telefone:telefone.value})});retContato.innerText=j(r);carregarClientes()}
+async function campanha(){let r=await api('/api/campanha',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mensagem:msgCamp.value,limite:limite.value,intervalo:intervalo.value})});retCamp.innerText=j(r)}
+async function carregarClientes(){let r=await api('/api/contatos');let cs=r.contatos||[];let sts=['novo','respondeu','interessado','aguardando_pagamento','aguardando_dados','finalizado'];kpis.innerHTML=sts.map(s=>'<div class="item"><b>'+cs.filter(c=>(c.status||'novo')===s).length+'</b><br><span class="tag">'+s+'</span></div>').join('');lista.innerHTML=cs.map(c=>'<div class="item"><b>'+(c.nome||'Sem nome')+'</b><br>'+c.telefone+'<br><span class="tag">'+(c.status||'novo')+'</span><br>Última: '+(c.ultima_mensagem||'-')+'</div>').join('')}
+setInterval(atualizar,10000);atualizar();</script></body></html>`; }
+app.get('/', (req, res) => res.redirect('/painel'));
+app.get('/painel', (req, res) => res.send(html()));
+app.listen(PORT, () => console.log('Reino Zap PRO V15 rodando na porta ' + PORT));
