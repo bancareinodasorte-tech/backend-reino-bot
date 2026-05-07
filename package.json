@@ -1,7 +1,7 @@
 {
   "name": "reino-zap-pro",
-  "version": "17.5.1",
-  "description": "Reino Zap PRO - painel WhatsApp com Baileys e Supabase",
+  "version": "17.6.2",
+  "description": "Reino Zap PRO V17.6.2 - base funcional com anti-duplicacao, contatos e campanhas",
   "type": "module",
   "main": "index.js",
   "scripts": {

@@ -1,12 +1,15 @@
-REINO ZAP PRO - RESTAURAÇÃO BASE FUNCIONAL V17.5
+REINO ZAP PRO V17.6.2
 
-Arquivos inclusos:
+Arquivos completos para substituir no GitHub:
 - index.js
 - package.json
-- README.txt
 
-Esta versão restaura a base enviada pelo usuário, com rota / redirecionando para /painel.
-No Render, o Start Command deve ser: npm start
-Variáveis obrigatórias se usar Supabase:
-- SUPABASE_URL
-- SUPABASE_KEY
+Correções principais:
+- Restaurado em cima da base V17.5 funcional enviada pelo usuário.
+- Corrigida duplicação causada por botões com onclick + listener duplicado.
+- Trava anti clique duplo no envio rápido, contato e campanha.
+- Bloqueio de envio duplicado no backend por pequena janela de segurança.
+- Busca de clientes por nome/telefone.
+- Mantidos QR, Supabase e envio rápido.
+
+Depois do upload no GitHub: Render > Manual Deploy > Deploy latest commit.
