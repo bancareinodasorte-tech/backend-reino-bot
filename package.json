@@ -1,9 +1,11 @@
 {
   "name": "reino-zap-pro",
-  "version": "17.1.0",
+  "version": "17.2.0",
   "type": "module",
   "main": "index.js",
-  "scripts": { "start": "node index.js" },
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.18",
     "cors": "^2.8.5",
