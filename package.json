@@ -1,22 +1,20 @@
 {
   "name": "reino-zap-pro",
-  "version": "17.6.1",
-  "description": "REINO ZAP PRO - painel operacional WhatsApp Reino da Sorte",
-  "main": "index.js",
+  "version": "17.5.1",
+  "description": "Reino Zap PRO - painel WhatsApp com Baileys e Supabase",
   "type": "module",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@adiwajshing/baileys": "^5.0.0",
-    "@supabase/supabase-js": "^2.45.4",
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "qrcode": "^1.5.4",
-    "multer": "^1.4.5-lts.1",
-    "pino": "^9.4.0"
+    "@whiskeysockets/baileys": "latest",
+    "cors": "latest",
+    "express": "latest",
+    "pino": "latest",
+    "qrcode": "latest"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   }
 }
