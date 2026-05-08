@@ -1,6 +1,6 @@
 {
   "name": "reino-zap-pro",
-  "version": "17.5.2",
+  "version": "17.5.3",
   "type": "module",
   "main": "index.js",
   "scripts": {
