@@ -1,7 +1,6 @@
 {
   "name": "reino-zap-pro",
-  "version": "17.6.2",
-  "description": "Reino Zap PRO V17.6.2 - base funcional com anti-duplicacao, contatos e campanhas",
+  "version": "17.7.0",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -9,12 +8,12 @@
   },
   "dependencies": {
     "@whiskeysockets/baileys": "latest",
-    "cors": "latest",
     "express": "latest",
+    "cors": "latest",
     "pino": "latest",
     "qrcode": "latest"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=18"
   }
 }
