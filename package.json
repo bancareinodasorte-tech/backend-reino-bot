@@ -1,6 +1,6 @@
 {
   "name": "reino-zap-pro",
-  "version": "17.7.0",
+  "version": "17.7.1",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -8,12 +8,9 @@
   },
   "dependencies": {
     "@whiskeysockets/baileys": "latest",
-    "express": "latest",
     "cors": "latest",
+    "express": "latest",
     "pino": "latest",
     "qrcode": "latest"
-  },
-  "engines": {
-    "node": ">=18"
   }
 }
